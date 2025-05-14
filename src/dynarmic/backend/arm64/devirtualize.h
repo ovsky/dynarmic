@@ -8,6 +8,8 @@
 #include <mcl/bit_cast.hpp>
 #include <mcl/stdint.hpp>
 #include <mcl/type_traits/function_info.hpp>
+#include <type_traits>
+#include <utility>
 
 namespace Dynarmic::Backend::Arm64 {
 
@@ -16,37 +18,57 @@ struct DevirtualizedCall {
     u64 this_ptr;
 };
 
-// https://rants.vastheman.com/2021/09/21/msvc/
-template<auto mfp>
-DevirtualizedCall DevirtualizeWindows(mcl::class_type<decltype(mfp)>* this_) {
-    static_assert(sizeof(mfp) == 8);
-    return DevirtualizedCall{mcl::bit_cast<u64>(mfp), reinterpret_cast<u64>(this_)};
+// Helper to ensure pointer alignment and avoid UB
+[[nodiscard]]
+constexpr u64 AdjustPointer(u64 ptr, u64 adj) noexcept {
+    return ptr + (adj >> 1);
 }
 
-// https://github.com/ARM-software/abi-aa/blob/main/cppabi64/cppabi64.rst#representation-of-pointer-to-member-function
+// MSVC/Windows implementation: pointer-to-member-function is just a pointer
 template<auto mfp>
-DevirtualizedCall DevirtualizeDefault(mcl::class_type<decltype(mfp)>* this_) {
+[[nodiscard]]
+constexpr DevirtualizedCall DevirtualizeWindows(mcl::class_type<decltype(mfp)>* this_) noexcept {
+    static_assert(sizeof(mfp) == 8, "Unexpected member function pointer size for MSVC/Windows.");
+    return DevirtualizedCall{
+        mcl::bit_cast<u64>(mfp),
+        reinterpret_cast<u64>(this_)
+    };
+}
+
+// ARM64 Itanium ABI implementation
+template<auto mfp>
+[[nodiscard]]
+DevirtualizedCall DevirtualizeDefault(mcl::class_type<decltype(mfp)>* this_) noexcept {
     struct MemberFunctionPointer {
-        // Address of non-virtual function or index into vtable.
         u64 ptr;
-        // LSB is discriminator for if function is virtual. Other bits are this adjustment.
         u64 adj;
-    } mfp_struct = mcl::bit_cast<MemberFunctionPointer>(mfp);
+    };
 
-    static_assert(sizeof(MemberFunctionPointer) == 16);
-    static_assert(sizeof(MemberFunctionPointer) == sizeof(mfp));
+    static_assert(sizeof(MemberFunctionPointer) == 16, "Unexpected member function pointer size for Itanium ABI.");
+    static_assert(sizeof(MemberFunctionPointer) == sizeof(mfp), "Member function pointer size mismatch.");
 
+    // Use constexpr if possible for compile-time optimization
+    const auto mfp_struct = mcl::bit_cast<MemberFunctionPointer>(mfp);
+
+    u64 this_ptr = AdjustPointer(mcl::bit_cast<u64>(this_), mfp_struct.adj);
     u64 fn_ptr = mfp_struct.ptr;
-    u64 this_ptr = mcl::bit_cast<u64>(this_) + (mfp_struct.adj >> 1);
-    if (mfp_struct.adj & 1) {
-        u64 vtable = mcl::bit_cast_pointee<u64>(this_ptr);
-        fn_ptr = mcl::bit_cast_pointee<u64>(vtable + fn_ptr);
+
+    // If LSB of adj is set, it's a virtual function
+    if (mfp_struct.adj & 1) [[unlikely]] {
+        // Use std::launder to avoid UB with pointer aliasing
+        auto* vtable_ptr = std::launder(reinterpret_cast<const u64*>(this_ptr));
+        u64 vtable = *vtable_ptr;
+        auto* fn_ptr_ptr = std::launder(reinterpret_cast<const u64*>(vtable + fn_ptr));
+        fn_ptr = *fn_ptr_ptr;
     }
+
     return DevirtualizedCall{fn_ptr, this_ptr};
 }
 
+// Main entry point: selects implementation based on platform
 template<auto mfp>
-DevirtualizedCall Devirtualize(mcl::class_type<decltype(mfp)>* this_) {
+[[nodiscard]]
+constexpr DevirtualizedCall Devirtualize(mcl::class_type<decltype(mfp)>* this_) noexcept {
 #if defined(_WIN32) && defined(_MSC_VER)
     return DevirtualizeWindows<mfp>(this_);
 #else

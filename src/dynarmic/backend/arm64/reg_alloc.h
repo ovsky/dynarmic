@@ -10,6 +10,9 @@
 #include <random>
 #include <utility>
 #include <vector>
+#include <bit>
+#include <algorithm>
+#include <span>
 
 #include <mcl/assert.hpp>
 #include <mcl/stdint.hpp>
@@ -28,16 +31,20 @@ class FpsrManager;
 class RegAlloc;
 
 struct HostLoc final {
-    enum class Kind {
+    enum class Kind : u8 {
         Gpr,
         Fpr,
         Flags,
         Spill,
     } kind;
     int index;
+
+    constexpr bool operator==(const HostLoc& other) const noexcept {
+        return kind == other.kind && index == other.index;
+    }
 };
 
-enum RWType {
+enum RWType : u8 {
     Void,
     Read,
     Write,
@@ -60,7 +67,6 @@ public:
     IR::Cond GetImmediateCond() const;
     IR::AccType GetImmediateAccType() const;
 
-    // Only valid if not immediate
     HostLoc::Kind CurrentLocationKind() const;
     bool IsInGpr() const { return !IsImmediate() && CurrentLocationKind() == HostLoc::Kind::Gpr; }
     bool IsInFpr() const { return !IsImmediate() && CurrentLocationKind() == HostLoc::Kind::Fpr; }
@@ -111,7 +117,7 @@ public:
     const T* operator->() const { return &reg.value(); }
 
     ~RAReg();
-    RAReg(RAReg&& other)
+    RAReg(RAReg&& other) noexcept
             : reg_alloc{other.reg_alloc}
             , rw{std::exchange(other.rw, RWType::Void)}
             , read_value{std::exchange(other.read_value, {})}
@@ -158,7 +164,7 @@ public:
     using ArgumentInfo = std::array<Argument, IR::max_arg_count>;
 
     explicit RegAlloc(oaknut::CodeGenerator& code, FpsrManager& fpsr_manager, std::vector<int> gpr_order, std::vector<int> fpr_order)
-            : code{code}, fpsr_manager{fpsr_manager}, gpr_order{gpr_order}, fpr_order{fpr_order}, rand_gen{std::random_device{}()} {}
+            : code{code}, fpsr_manager{fpsr_manager}, gpr_order{std::move(gpr_order)}, fpr_order{std::move(fpr_order)}, rand_gen{std::random_device{}()} {}
 
     ArgumentInfo GetArgumentInfo(IR::Inst* inst);
     bool WasValueDefined(IR::Inst* inst) const;
