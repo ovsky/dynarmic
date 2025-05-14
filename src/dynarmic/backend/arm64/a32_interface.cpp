@@ -5,7 +5,8 @@
 
 #include <memory>
 #include <mutex>
-
+#include <shared_mutex>
+#include <atomic>
 #include <boost/icl/interval_set.hpp>
 #include <mcl/assert.hpp>
 #include <mcl/scope_exit.hpp>
@@ -21,16 +22,20 @@ namespace Dynarmic::A32 {
 
 using namespace Backend::Arm64;
 
-struct Jit::Impl final {
+class Jit::Impl final {
+public:
     Impl(Jit* jit_interface, A32::UserConfig conf)
-            : jit_interface(jit_interface)
-            , conf(conf)
-            , current_address_space(conf)
-            , core(conf) {}
+        : jit_interface(jit_interface)
+        , conf(std::move(conf))
+        , current_address_space(this->conf)
+        , core(this->conf)
+        , halt_reason(0)
+        , invalidate_entire_cache(false)
+    {}
 
     HaltReason Run() {
         ASSERT(!jit_interface->is_executing);
-        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(halt_reason.load(std::memory_order_acquire)));
 
         jit_interface->is_executing = true;
         SCOPE_EXIT {
@@ -46,7 +51,7 @@ struct Jit::Impl final {
 
     HaltReason Step() {
         ASSERT(!jit_interface->is_executing);
-        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(halt_reason.load(std::memory_order_acquire)));
 
         jit_interface->is_executing = true;
         SCOPE_EXIT {
@@ -61,14 +66,19 @@ struct Jit::Impl final {
     }
 
     void ClearCache() {
-        std::unique_lock lock{invalidation_mutex};
-        invalidate_entire_cache = true;
+        {
+            std::unique_lock lock(invalidation_mutex);
+            invalidate_entire_cache = true;
+        }
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
     void InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
-        std::unique_lock lock{invalidation_mutex};
-        invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        {
+            std::unique_lock lock(invalidation_mutex);
+            invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(
+                start_address, static_cast<u32>(start_address + length - 1)));
+        }
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
@@ -77,48 +87,48 @@ struct Jit::Impl final {
     }
 
     void HaltExecution(HaltReason hr) {
-        Atomic::Or(&halt_reason, static_cast<u32>(hr));
-        Atomic::Barrier();
+        halt_reason.fetch_or(static_cast<u32>(hr), std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     void ClearHalt(HaltReason hr) {
-        Atomic::And(&halt_reason, ~static_cast<u32>(hr));
-        Atomic::Barrier();
+        halt_reason.fetch_and(~static_cast<u32>(hr), std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
-    std::array<std::uint32_t, 16>& Regs() {
+    std::array<std::uint32_t, 16>& Regs() noexcept {
         return current_state.regs;
     }
 
-    const std::array<std::uint32_t, 16>& Regs() const {
+    const std::array<std::uint32_t, 16>& Regs() const noexcept {
         return current_state.regs;
     }
 
-    std::array<std::uint32_t, 64>& ExtRegs() {
+    std::array<std::uint32_t, 64>& ExtRegs() noexcept {
         return current_state.ext_regs;
     }
 
-    const std::array<std::uint32_t, 64>& ExtRegs() const {
+    const std::array<std::uint32_t, 64>& ExtRegs() const noexcept {
         return current_state.ext_regs;
     }
 
-    std::uint32_t Cpsr() const {
+    std::uint32_t Cpsr() const noexcept {
         return current_state.Cpsr();
     }
 
-    void SetCpsr(std::uint32_t value) {
+    void SetCpsr(std::uint32_t value) noexcept {
         current_state.SetCpsr(value);
     }
 
-    std::uint32_t Fpscr() const {
+    std::uint32_t Fpscr() const noexcept {
         return current_state.Fpscr();
     }
 
-    void SetFpscr(std::uint32_t value) {
+    void SetFpscr(std::uint32_t value) noexcept {
         current_state.SetFpscr(value);
     }
 
-    void ClearExclusiveState() {
+    void ClearExclusiveState() noexcept {
         current_state.exclusive_state = false;
     }
 
@@ -129,13 +139,12 @@ struct Jit::Impl final {
 private:
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
-            std::unique_lock lock{invalidation_mutex};
+            std::unique_lock lock(invalidation_mutex);
 
             ClearHalt(HaltReason::CacheInvalidation);
 
             if (invalidate_entire_cache) {
                 current_address_space.ClearCache();
-
                 invalidate_entire_cache = false;
                 invalid_cache_ranges.clear();
                 return;
@@ -143,7 +152,6 @@ private:
 
             if (!invalid_cache_ranges.empty()) {
                 current_address_space.InvalidateCacheRanges(invalid_cache_ranges);
-
                 invalid_cache_ranges.clear();
                 return;
             }
@@ -151,20 +159,20 @@ private:
     }
 
     Jit* jit_interface;
-    A32::UserConfig conf;
+    const A32::UserConfig conf;
     A32JitState current_state{};
     A32AddressSpace current_address_space;
     A32Core core;
 
-    volatile u32 halt_reason = 0;
+    std::atomic<u32> halt_reason;
 
-    std::mutex invalidation_mutex;
+    mutable std::mutex invalidation_mutex;
     boost::icl::interval_set<u32> invalid_cache_ranges;
-    bool invalidate_entire_cache = false;
+    bool invalidate_entire_cache;
 };
 
 Jit::Jit(UserConfig conf)
-        : impl(std::make_unique<Impl>(this, conf)) {}
+    : impl(std::make_unique<Impl>(this, std::move(conf))) {}
 
 Jit::~Jit() = default;
 

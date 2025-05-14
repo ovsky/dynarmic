@@ -5,7 +5,10 @@
 
 #include <memory>
 #include <mutex>
-
+#include <shared_mutex>
+#include <vector>
+#include <array>
+#include <cstring>
 #include <boost/icl/interval_set.hpp>
 #include <mcl/assert.hpp>
 #include <mcl/scope_exit.hpp>
@@ -22,19 +25,21 @@ namespace Dynarmic::A64 {
 
 using namespace Backend::Arm64;
 
-struct Jit::Impl final {
+class Jit::Impl final {
+public:
     Impl(Jit*, A64::UserConfig conf)
-            : conf(conf)
-            , current_address_space(conf)
-            , core(conf) {}
+        : conf(std::move(conf))
+        , current_address_space(this->conf)
+        , core(this->conf)
+    {}
 
     HaltReason Run() {
-        ASSERT(!is_executing);
+        ASSERT(!is_executing.load(std::memory_order_acquire));
         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
 
-        is_executing = true;
+        is_executing.store(true, std::memory_order_release);
         SCOPE_EXIT {
-            is_executing = false;
+            is_executing.store(false, std::memory_order_release);
         };
 
         HaltReason hr = core.Run(current_address_space, current_state, &halt_reason);
@@ -45,12 +50,12 @@ struct Jit::Impl final {
     }
 
     HaltReason Step() {
-        ASSERT(!is_executing);
+        ASSERT(!is_executing.load(std::memory_order_acquire));
         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
 
-        is_executing = true;
+        is_executing.store(true, std::memory_order_release);
         SCOPE_EXIT {
-            is_executing = false;
+            is_executing.store(false, std::memory_order_release);
         };
 
         HaltReason hr = core.Step(current_address_space, current_state, &halt_reason);
@@ -67,6 +72,7 @@ struct Jit::Impl final {
     }
 
     void InvalidateCacheRange(std::uint64_t start_address, std::size_t length) {
+        if (length == 0) return;
         std::unique_lock lock{invalidation_mutex};
         invalid_cache_ranges.add(boost::icl::discrete_interval<u64>::closed(start_address, start_address + length - 1));
         HaltExecution(HaltReason::CacheInvalidation);
@@ -84,68 +90,68 @@ struct Jit::Impl final {
         Atomic::And(&halt_reason, ~static_cast<u32>(hr));
     }
 
-    std::uint64_t PC() const {
+    std::uint64_t PC() const noexcept {
         return current_state.pc;
     }
 
-    void SetPC(std::uint64_t value) {
+    void SetPC(std::uint64_t value) noexcept {
         current_state.pc = value;
     }
 
-    std::uint64_t SP() const {
+    std::uint64_t SP() const noexcept {
         return current_state.sp;
     }
 
-    void SetSP(std::uint64_t value) {
+    void SetSP(std::uint64_t value) noexcept {
         current_state.sp = value;
     }
 
-    std::array<std::uint64_t, 31>& Regs() {
+    std::array<std::uint64_t, 31>& Regs() noexcept {
         return current_state.reg;
     }
 
-    const std::array<std::uint64_t, 31>& Regs() const {
+    const std::array<std::uint64_t, 31>& Regs() const noexcept {
         return current_state.reg;
     }
 
-    std::array<std::uint64_t, 64>& VecRegs() {
+    std::array<std::uint64_t, 64>& VecRegs() noexcept {
         return current_state.vec;
     }
 
-    const std::array<std::uint64_t, 64>& VecRegs() const {
+    const std::array<std::uint64_t, 64>& VecRegs() const noexcept {
         return current_state.vec;
     }
 
-    std::uint32_t Fpcr() const {
+    std::uint32_t Fpcr() const noexcept {
         return current_state.fpcr;
     }
 
-    void SetFpcr(std::uint32_t value) {
+    void SetFpcr(std::uint32_t value) noexcept {
         current_state.fpcr = value;
     }
 
-    std::uint32_t Fpsr() const {
+    std::uint32_t Fpsr() const noexcept {
         return current_state.fpsr;
     }
 
-    void SetFpsr(std::uint32_t value) {
+    void SetFpsr(std::uint32_t value) noexcept {
         current_state.fpsr = value;
     }
 
-    std::uint32_t Pstate() const {
+    std::uint32_t Pstate() const noexcept {
         return current_state.cpsr_nzcv;
     }
 
-    void SetPstate(std::uint32_t value) {
+    void SetPstate(std::uint32_t value) noexcept {
         current_state.cpsr_nzcv = value;
     }
 
-    void ClearExclusiveState() {
+    void ClearExclusiveState() noexcept {
         current_state.exclusive_state = false;
     }
 
-    bool IsExecuting() const {
-        return is_executing;
+    bool IsExecuting() const noexcept {
+        return is_executing.load(std::memory_order_acquire);
     }
 
     void DumpDisassembly() const {
@@ -154,6 +160,7 @@ struct Jit::Impl final {
 
     std::vector<std::string> Disassemble() const {
         ASSERT_FALSE("Unimplemented");
+        return {};
     }
 
 private:
@@ -187,14 +194,14 @@ private:
 
     volatile u32 halt_reason = 0;
 
-    std::mutex invalidation_mutex;
+    mutable std::mutex invalidation_mutex;
     boost::icl::interval_set<u64> invalid_cache_ranges;
     bool invalidate_entire_cache = false;
-    bool is_executing = false;
+    std::atomic<bool> is_executing{false};
 };
 
 Jit::Jit(UserConfig conf)
-        : impl{std::make_unique<Jit::Impl>(this, conf)} {
+    : impl{std::make_unique<Jit::Impl>(this, std::move(conf))} {
 }
 
 Jit::~Jit() = default;
@@ -260,7 +267,7 @@ void Jit::SetRegisters(const std::array<std::uint64_t, 31>& value) {
 }
 
 Vector Jit::GetVector(std::size_t index) const {
-    auto& vec = impl->VecRegs();
+    const auto& vec = impl->VecRegs();
     return {vec[index * 2], vec[index * 2 + 1]};
 }
 

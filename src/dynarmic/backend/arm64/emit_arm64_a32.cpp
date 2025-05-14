@@ -22,9 +22,9 @@ namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
 
-oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext&, IR::Cond cond) {
+// Helper: Inline always for small functions
+[[gnu::always_inline]] inline oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext&, IR::Cond cond) {
     oaknut::Label pass;
-    // TODO: Flags in host flags
     code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
     code.MSR(oaknut::SystemReg::NZCV, Xscratch0);
     code.B(static_cast<oaknut::Cond>(cond), pass);
@@ -41,7 +41,7 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Re
     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
-static void EmitSetUpperLocationDescriptor(oaknut::CodeGenerator& code, EmitContext& ctx, IR::LocationDescriptor new_location, IR::LocationDescriptor old_location) {
+[[gnu::always_inline]] inline void EmitSetUpperLocationDescriptor(oaknut::CodeGenerator& code, EmitContext& ctx, IR::LocationDescriptor new_location, IR::LocationDescriptor old_location) {
     auto get_upper = [](const IR::LocationDescriptor& desc) -> u32 {
         return static_cast<u32>(A32::LocationDescriptor{desc}.SetSingleStepping(false).UniqueHash() >> 32);
     };
@@ -52,7 +52,7 @@ static void EmitSetUpperLocationDescriptor(oaknut::CodeGenerator& code, EmitCont
         return get_upper(new_location) & mask;
     }();
 
-    if (old_upper != new_upper) {
+    if (old_upper != new_upper) [[likely]] {
         code.MOV(Wscratch0, new_upper);
         code.STR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
     }
@@ -63,7 +63,7 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 
     oaknut::Label fail;
 
-    if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
+    if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) [[likely]] {
         if (ctx.conf.enable_cycle_counting) {
             code.CMP(Xticks, 0);
             code.B(LE, fail);
@@ -84,7 +84,7 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::LinkBlockFast terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
     EmitSetUpperLocationDescriptor(code, ctx, terminal.next, initial_location);
 
-    if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
+    if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) [[likely]] {
         EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
     }
 
@@ -94,7 +94,7 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 }
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::PopRSBHint, IR::LocationDescriptor, bool is_single_step) {
-    if (ctx.conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) && !is_single_step) {
+    if (ctx.conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) && !is_single_step) [[likely]] {
         oaknut::Label fail;
 
         code.LDR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
@@ -120,7 +120,6 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool) {
     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
-
     // TODO: Implement FastDispatchHint optimization
 }
 
@@ -164,7 +163,7 @@ void EmitA32ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ct
 }
 
 void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end) {
-    if (!ctx.conf.check_halt_on_memory_access) {
+    if (!ctx.conf.check_halt_on_memory_access) [[unlikely]] {
         return;
     }
 
@@ -179,55 +178,22 @@ void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
     EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
 }
 
-template<>
-void EmitIR<IR::Opcode::A32SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
-    if (args[0].IsImmediate()) {
-        if (args[0].GetImmediateU1()) {
-            code.MOV(Wscratch0, 1);
-            code.STRB(Wscratch0, SP, offsetof(StackLayout, check_bit));
-        } else {
-            code.STRB(WZR, SP, offsetof(StackLayout, check_bit));
-        }
-    } else {
-        auto Wbit = ctx.reg_alloc.ReadW(args[0]);
-        RegAlloc::Realize(Wbit);
-        code.STRB(Wbit, SP, offsetof(StackLayout, check_bit));
-    }
+// Macro for repetitive codegen for register access
+#define EMIT_A32_REG_ACCESS(OP, TYPE, REGFUNC, REGWRITEFUNC, SIZE, REGCOUNT) \
+template<> \
+void EmitIR<IR::Opcode::A32##OP>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    const A32::TYPE reg = inst->GetArg(0).GetA32##REGFUNC##Ref(); \
+    auto result = ctx.reg_alloc.REGWRITEFUNC(inst); \
+    RegAlloc::Realize(result); \
+    code.LDR(result, Xstate, offsetof(A32JitState, REGCOUNT) + SIZE * static_cast<size_t>(reg)); \
 }
 
-template<>
-void EmitIR<IR::Opcode::A32GetRegister>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    const A32::Reg reg = inst->GetArg(0).GetA32RegRef();
-
-    auto Wresult = ctx.reg_alloc.WriteW(inst);
-    RegAlloc::Realize(Wresult);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
-    code.LDR(Wresult, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * static_cast<size_t>(reg));
-}
-
-template<>
-void EmitIR<IR::Opcode::A32GetExtendedRegister32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsSingleExtReg(reg));
-    const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::S0);
-
-    auto Sresult = ctx.reg_alloc.WriteS(inst);
-    RegAlloc::Realize(Sresult);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
-    code.LDR(Sresult, Xstate, offsetof(A32JitState, ext_regs) + sizeof(u32) * index);
-}
+EMIT_A32_REG_ACCESS(GetRegister, Reg, Reg, WriteW, sizeof(u32), regs)
+EMIT_A32_REG_ACCESS(GetExtendedRegister32, ExtReg, ExtReg, WriteS, sizeof(u32), ext_regs)
 
 template<>
 void EmitIR<IR::Opcode::A32GetVector>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsDoubleExtReg(reg) || A32::IsQuadExtReg(reg));
-
     if (A32::IsDoubleExtReg(reg)) {
         const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::D0);
         auto Dresult = ctx.reg_alloc.WriteD(inst);
@@ -244,67 +210,42 @@ void EmitIR<IR::Opcode::A32GetVector>(oaknut::CodeGenerator& code, EmitContext& 
 template<>
 void EmitIR<IR::Opcode::A32GetExtendedRegister64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsDoubleExtReg(reg));
     const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::D0);
-
     auto Dresult = ctx.reg_alloc.WriteD(inst);
     RegAlloc::Realize(Dresult);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
     code.LDR(Dresult, Xstate, offsetof(A32JitState, ext_regs) + 2 * sizeof(u32) * index);
 }
 
-template<>
-void EmitIR<IR::Opcode::A32SetRegister>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    const A32::Reg reg = inst->GetArg(0).GetA32RegRef();
+#undef EMIT_A32_REG_ACCESS
 
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
-    auto Wvalue = ctx.reg_alloc.ReadW(args[1]);
-    RegAlloc::Realize(Wvalue);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
-    code.STR(Wvalue, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * static_cast<size_t>(reg));
+// Macro for repetitive codegen for register set
+#define EMIT_A32_REG_SET(OP, TYPE, REGFUNC, REGREADFUNC, SIZE, REGCOUNT) \
+template<> \
+void EmitIR<IR::Opcode::A32##OP>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    const A32::TYPE reg = inst->GetArg(0).GetA32##REGFUNC##Ref(); \
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst); \
+    auto value = ctx.reg_alloc.REGREADFUNC(args[1]); \
+    RegAlloc::Realize(value); \
+    code.STR(value, Xstate, offsetof(A32JitState, REGCOUNT) + SIZE * static_cast<size_t>(reg)); \
 }
 
-template<>
-void EmitIR<IR::Opcode::A32SetExtendedRegister32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsSingleExtReg(reg));
-    const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::S0);
-
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-    auto Svalue = ctx.reg_alloc.ReadS(args[1]);
-    RegAlloc::Realize(Svalue);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
-    code.STR(Svalue, Xstate, offsetof(A32JitState, ext_regs) + sizeof(u32) * index);
-}
+EMIT_A32_REG_SET(SetRegister, Reg, Reg, ReadW, sizeof(u32), regs)
+EMIT_A32_REG_SET(SetExtendedRegister32, ExtReg, ExtReg, ReadS, sizeof(u32), ext_regs)
 
 template<>
 void EmitIR<IR::Opcode::A32SetExtendedRegister64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsDoubleExtReg(reg));
     const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::D0);
-
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Dvalue = ctx.reg_alloc.ReadD(args[1]);
     RegAlloc::Realize(Dvalue);
-
-    // TODO: Detect if Gpr vs Fpr is more appropriate
-
     code.STR(Dvalue, Xstate, offsetof(A32JitState, ext_regs) + 2 * sizeof(u32) * index);
 }
 
 template<>
 void EmitIR<IR::Opcode::A32SetVector>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const A32::ExtReg reg = inst->GetArg(0).GetA32ExtRegRef();
-    ASSERT(A32::IsDoubleExtReg(reg) || A32::IsQuadExtReg(reg));
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
     if (A32::IsDoubleExtReg(reg)) {
         const size_t index = static_cast<size_t>(reg) - static_cast<size_t>(A32::ExtReg::D0);
         auto Dvalue = ctx.reg_alloc.ReadD(args[1]);
@@ -315,6 +256,25 @@ void EmitIR<IR::Opcode::A32SetVector>(oaknut::CodeGenerator& code, EmitContext& 
         auto Qvalue = ctx.reg_alloc.ReadQ(args[1]);
         RegAlloc::Realize(Qvalue);
         code.STR(Qvalue, Xstate, offsetof(A32JitState, ext_regs) + 2 * sizeof(u64) * index);
+    }
+}
+
+#undef EMIT_A32_REG_SET
+
+template<>
+void EmitIR<IR::Opcode::A32SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    if (args[0].IsImmediate()) {
+        if (args[0].GetImmediateU1()) {
+            code.MOV(Wscratch0, 1);
+            code.STRB(Wscratch0, SP, offsetof(StackLayout, check_bit));
+        } else {
+            code.STRB(WZR, SP, offsetof(StackLayout, check_bit));
+        }
+    } else {
+        auto Wbit = ctx.reg_alloc.ReadW(args[0]);
+        RegAlloc::Realize(Wbit);
+        code.STRB(Wbit, SP, offsetof(StackLayout, check_bit));
     }
 }
 
@@ -339,8 +299,6 @@ void EmitIR<IR::Opcode::A32GetCpsr>(oaknut::CodeGenerator& code, EmitContext& ct
 
     code.LDR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
     code.AND(Wscratch0, Wscratch0, 0b11);
-    // 9 8 7 6 5
-    //       E T
     code.ORR(Wscratch0, Wscratch0, Wscratch0, LSL, 3);
     code.AND(Wscratch0, Wscratch0, 0x11111111);
     code.ORR(Wcpsr, Wcpsr, Wscratch0, LSL, 5);
@@ -352,19 +310,12 @@ void EmitIR<IR::Opcode::A32SetCpsr>(oaknut::CodeGenerator& code, EmitContext& ct
     auto Wcpsr = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wcpsr);
 
-    // NZCV, Q flags
     code.AND(Wscratch0, Wcpsr, 0xF0000000);
     code.AND(Wscratch1, Wcpsr, 1 << 27);
 
     static_assert(offsetof(A32JitState, cpsr_nzcv) + sizeof(u32) == offsetof(A32JitState, cpsr_q));
     code.STP(Wscratch0, Wscratch1, Xstate, offsetof(A32JitState, cpsr_nzcv));
 
-    // GE flags
-    // this does the following:
-    // cpsr_ge |= mcl::bit::get_bit<19>(cpsr) ? 0xFF000000 : 0;
-    // cpsr_ge |= mcl::bit::get_bit<18>(cpsr) ? 0x00FF0000 : 0;
-    // cpsr_ge |= mcl::bit::get_bit<17>(cpsr) ? 0x0000FF00 : 0;
-    // cpsr_ge |= mcl::bit::get_bit<16>(cpsr) ? 0x000000FF : 0;
     code.UBFX(Wscratch0, Wcpsr, 16, 4);
     code.MOV(Wscratch1, 0x00204081);
     code.MUL(Wscratch0, Wscratch0, Wscratch1);
@@ -372,20 +323,17 @@ void EmitIR<IR::Opcode::A32SetCpsr>(oaknut::CodeGenerator& code, EmitContext& ct
     code.LSL(Wscratch1, Wscratch0, 8);
     code.SUB(Wscratch0, Wscratch1, Wscratch0);
 
-    // Other flags
     code.MOV(Wscratch1, 0x010001DF);
     code.AND(Wscratch1, Wcpsr, Wscratch1);
 
     static_assert(offsetof(A32JitState, cpsr_jaifm) + sizeof(u32) == offsetof(A32JitState, cpsr_ge));
     code.STP(Wscratch1, Wscratch0, Xstate, offsetof(A32JitState, cpsr_jaifm));
 
-    // IT state
     code.AND(Wscratch0, Wcpsr, 0xFC00);
     code.LSR(Wscratch1, Wcpsr, 17);
     code.AND(Wscratch1, Wscratch1, 0x300);
     code.ORR(Wscratch0, Wscratch0, Wscratch1);
 
-    // E flag, T flag
     code.LSR(Wscratch1, Wcpsr, 8);
     code.AND(Wscratch1, Wscratch1, 0x2);
     code.ORR(Wscratch0, Wscratch0, Wscratch1);
@@ -401,7 +349,6 @@ void EmitIR<IR::Opcode::A32SetCpsrNZCV>(oaknut::CodeGenerator& code, EmitContext
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Wnzcv = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wnzcv);
-
     code.STR(Wnzcv, Xstate, offsetof(A32JitState, cpsr_nzcv));
 }
 
@@ -410,7 +357,6 @@ void EmitIR<IR::Opcode::A32SetCpsrNZCVRaw>(oaknut::CodeGenerator& code, EmitCont
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Wnzcv = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wnzcv);
-
     code.STR(Wnzcv, Xstate, offsetof(A32JitState, cpsr_nzcv));
 }
 
@@ -430,11 +376,8 @@ void EmitIR<IR::Opcode::A32SetCpsrNZCVQ>(oaknut::CodeGenerator& code, EmitContex
 template<>
 void EmitIR<IR::Opcode::A32SetCpsrNZ>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
     auto Wnz = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wnz);
-
-    // TODO: Track latent value
 
     code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
     code.AND(Wscratch0, Wscratch0, 0x30000000);
@@ -446,22 +389,16 @@ template<>
 void EmitIR<IR::Opcode::A32SetCpsrNZC>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
 
-    // TODO: Track latent value
-
     if (args[0].IsImmediate()) {
         if (args[1].IsImmediate()) {
             const u32 carry = args[1].GetImmediateU1() ? 0x2000'0000 : 0;
-
             code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
             code.AND(Wscratch0, Wscratch0, 0x10000000);
-            if (carry) {
-                code.ORR(Wscratch0, Wscratch0, carry);
-            }
+            if (carry) code.ORR(Wscratch0, Wscratch0, carry);
             code.STR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
         } else {
             auto Wc = ctx.reg_alloc.ReadW(args[1]);
             RegAlloc::Realize(Wc);
-
             code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
             code.AND(Wscratch0, Wscratch0, 0x10000000);
             code.ORR(Wscratch0, Wscratch0, Wc);
@@ -472,19 +409,15 @@ void EmitIR<IR::Opcode::A32SetCpsrNZC>(oaknut::CodeGenerator& code, EmitContext&
             const u32 carry = args[1].GetImmediateU1() ? 0x2000'0000 : 0;
             auto Wnz = ctx.reg_alloc.ReadW(args[0]);
             RegAlloc::Realize(Wnz);
-
             code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
             code.AND(Wscratch0, Wscratch0, 0x10000000);
             code.ORR(Wscratch0, Wscratch0, Wnz);
-            if (carry) {
-                code.ORR(Wscratch0, Wscratch0, carry);
-            }
+            if (carry) code.ORR(Wscratch0, Wscratch0, carry);
             code.STR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
         } else {
             auto Wnz = ctx.reg_alloc.ReadW(args[0]);
             auto Wc = ctx.reg_alloc.ReadW(args[1]);
             RegAlloc::Realize(Wnz, Wc);
-
             code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_nzcv));
             code.AND(Wscratch0, Wscratch0, 0x10000000);
             code.ORR(Wscratch0, Wscratch0, Wnz);
@@ -498,7 +431,6 @@ template<>
 void EmitIR<IR::Opcode::A32GetCFlag>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto Wflag = ctx.reg_alloc.WriteW(inst);
     RegAlloc::Realize(Wflag);
-
     code.LDR(Wflag, Xstate, offsetof(A32JitState, cpsr_nzcv));
     code.AND(Wflag, Wflag, 1 << 29);
 }
@@ -508,7 +440,6 @@ void EmitIR<IR::Opcode::A32OrQFlag>(oaknut::CodeGenerator& code, EmitContext& ct
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Wflag = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wflag);
-
     code.LDR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_q));
     code.ORR(Wscratch0, Wscratch0, Wflag, LSL, 27);
     code.STR(Wscratch0, Xstate, offsetof(A32JitState, cpsr_q));
@@ -518,17 +449,14 @@ template<>
 void EmitIR<IR::Opcode::A32GetGEFlags>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto Snzcv = ctx.reg_alloc.WriteS(inst);
     RegAlloc::Realize(Snzcv);
-
     code.LDR(Snzcv, Xstate, offsetof(A32JitState, cpsr_ge));
 }
 
 template<>
 void EmitIR<IR::Opcode::A32SetGEFlags>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
     auto Snzcv = ctx.reg_alloc.ReadS(args[0]);
     RegAlloc::Realize(Snzcv);
-
     code.STR(Snzcv, Xstate, offsetof(A32JitState, cpsr_ge));
 }
 
@@ -642,10 +570,9 @@ void EmitIR<IR::Opcode::A32DataMemoryBarrier>(oaknut::CodeGenerator& code, EmitC
 
 template<>
 void EmitIR<IR::Opcode::A32InstructionSynchronizationBarrier>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst*) {
-    if (!ctx.conf.hook_isb) {
+    if (!ctx.conf.hook_isb) [[unlikely]] {
         return;
     }
-
     ctx.reg_alloc.PrepareForCall();
     EmitRelocation(code, ctx, LinkTarget::InstructionSynchronizationBarrierRaised);
 }
@@ -691,7 +618,6 @@ template<>
 void EmitIR<IR::Opcode::A32GetFpscrNZCV>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto Wnzcv = ctx.reg_alloc.WriteW(inst);
     RegAlloc::Realize(Wnzcv);
-
     code.LDR(Wnzcv, Xstate, offsetof(A32JitState, fpsr_nzcv));
 }
 
@@ -700,7 +626,6 @@ void EmitIR<IR::Opcode::A32SetFpscrNZCV>(oaknut::CodeGenerator& code, EmitContex
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Wnzcv = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wnzcv);
-
     code.STR(Wnzcv, Xstate, offsetof(A32JitState, fpsr_nzcv));
 }
 

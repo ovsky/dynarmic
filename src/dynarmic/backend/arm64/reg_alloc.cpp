@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <random>
+#include <optional>
+#include <utility>
+#include <vector>
 
 #include <mcl/assert.hpp>
 #include <mcl/bit/bit_field.hpp>
@@ -28,20 +32,20 @@ using namespace oaknut::util;
 constexpr size_t spill_offset = offsetof(StackLayout, spill);
 constexpr size_t spill_slot_size = sizeof(decltype(StackLayout::spill)::value_type);
 
-static bool IsValuelessType(IR::Type type) {
-    switch (type) {
-    case IR::Type::Table:
-        return true;
-    default:
-        return false;
-    }
+namespace {
+
+[[nodiscard]]
+constexpr bool IsValuelessType(IR::Type type) noexcept {
+    return type == IR::Type::Table;
 }
 
-IR::Type Argument::GetType() const {
+} // anonymous namespace
+
+IR::Type Argument::GetType() const noexcept {
     return value.GetType();
 }
 
-bool Argument::IsImmediate() const {
+bool Argument::IsImmediate() const noexcept {
     return value.IsImmediate();
 }
 
@@ -52,19 +56,19 @@ bool Argument::GetImmediateU1() const {
 u8 Argument::GetImmediateU8() const {
     const u64 imm = value.GetImmediateAsU64();
     ASSERT(imm < 0x100);
-    return u8(imm);
+    return static_cast<u8>(imm);
 }
 
 u16 Argument::GetImmediateU16() const {
     const u64 imm = value.GetImmediateAsU64();
     ASSERT(imm < 0x10000);
-    return u16(imm);
+    return static_cast<u16>(imm);
 }
 
 u32 Argument::GetImmediateU32() const {
     const u64 imm = value.GetImmediateAsU64();
     ASSERT(imm < 0x100000000);
-    return u32(imm);
+    return static_cast<u32>(imm);
 }
 
 u64 Argument::GetImmediateU64() const {
@@ -85,7 +89,7 @@ HostLoc::Kind Argument::CurrentLocationKind() const {
     return reg_alloc.ValueLocation(value.GetInst())->kind;
 }
 
-bool HostLocInfo::Contains(const IR::Inst* value) const {
+bool HostLocInfo::Contains(const IR::Inst* value) const noexcept {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 
@@ -104,15 +108,15 @@ void HostLocInfo::SetupLocation(const IR::Inst* value) {
     expected_uses = value->UseCount();
 }
 
-bool HostLocInfo::IsCompletelyEmpty() const {
+bool HostLocInfo::IsCompletelyEmpty() const noexcept {
     return values.empty() && !locked && !realized && !accumulated_uses && !expected_uses && !uses_this_inst;
 }
 
-bool HostLocInfo::MaybeAllocatable() const {
+bool HostLocInfo::MaybeAllocatable() const noexcept {
     return !locked && !realized;
 }
 
-bool HostLocInfo::IsOneRemainingUse() const {
+bool HostLocInfo::IsOneRemainingUse() const noexcept {
     return accumulated_uses + 1 == expected_uses && uses_this_inst == 1;
 }
 
@@ -129,7 +133,7 @@ void HostLocInfo::UpdateUses() {
 
 RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(IR::Inst* inst) {
     ArgumentInfo ret = {Argument{*this}, Argument{*this}, Argument{*this}, Argument{*this}};
-    for (size_t i = 0; i < inst->NumArgs(); i++) {
+    for (size_t i = 0, n = inst->NumArgs(); i < n; ++i) {
         const IR::Value arg = inst->GetArg(i);
         ret[i].value = arg;
         if (!arg.IsImmediate() && !IsValuelessType(arg.GetType())) {
@@ -141,22 +145,27 @@ RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(IR::Inst* inst) {
 }
 
 bool RegAlloc::WasValueDefined(IR::Inst* inst) const {
-    return defined_insts.count(inst) > 0;
+    return defined_insts.contains(inst);
 }
 
-void RegAlloc::PrepareForCall(std::optional<Argument::copyable_reference> arg0, std::optional<Argument::copyable_reference> arg1, std::optional<Argument::copyable_reference> arg2, std::optional<Argument::copyable_reference> arg3) {
+void RegAlloc::PrepareForCall(
+    std::optional<Argument::copyable_reference> arg0,
+    std::optional<Argument::copyable_reference> arg1,
+    std::optional<Argument::copyable_reference> arg2,
+    std::optional<Argument::copyable_reference> arg3
+) {
     fpsr_manager.Spill();
     SpillFlags();
 
     // TODO: Spill into callee-save registers
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; ++i) {
         if (mcl::bit::get_bit(i, static_cast<u32>(ABI_CALLER_SAVE))) {
             SpillGpr(i);
         }
     }
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 32; ++i) {
         if (mcl::bit::get_bit(i, static_cast<u32>(ABI_CALLER_SAVE >> 32))) {
             SpillFpr(i);
         }
@@ -164,26 +173,22 @@ void RegAlloc::PrepareForCall(std::optional<Argument::copyable_reference> arg0, 
 
     const std::array<std::optional<Argument::copyable_reference>, 4> args{arg0, arg1, arg2, arg3};
 
-    // AAPCS64 Next General-purpose Register Number
-    int ngrn = 0;
-    // AAPCS64 Next SIMD and Floating-point Register Number
-    int nsrn = 0;
+    int ngrn = 0; // Next General-purpose Register Number
+    int nsrn = 0; // Next SIMD and Floating-point Register Number
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; ++i) {
         if (args[i]) {
             if (args[i]->get().GetType() == IR::Type::U128) {
                 ASSERT(fprs[nsrn].IsCompletelyEmpty());
                 LoadCopyInto(args[i]->get().value, oaknut::QReg{nsrn});
-                nsrn++;
+                ++nsrn;
             } else {
                 ASSERT(gprs[ngrn].IsCompletelyEmpty());
                 LoadCopyInto(args[i]->get().value, oaknut::XReg{ngrn});
-                ngrn++;
+                ++ngrn;
             }
         } else {
-            // Gaps are assumed to be in general-purpose registers
-            // TODO: should there be a separate list passed for FPRs instead?
-            ngrn++;
+            ++ngrn;
         }
     }
 }
@@ -214,16 +219,10 @@ void RegAlloc::DefineAsRegister(IR::Inst* inst, oaknut::Reg reg) {
 }
 
 void RegAlloc::UpdateAllUses() {
-    for (auto& gpr : gprs) {
-        gpr.UpdateUses();
-    }
-    for (auto& fpr : fprs) {
-        fpr.UpdateUses();
-    }
+    for (auto& gpr : gprs) gpr.UpdateUses();
+    for (auto& fpr : fprs) fpr.UpdateUses();
     flags.UpdateUses();
-    for (auto& spill : spills) {
-        spill.UpdateUses();
-    }
+    for (auto& spill : spills) spill.UpdateUses();
 }
 
 void RegAlloc::AssertAllUnlocked() const {
@@ -246,7 +245,6 @@ void RegAlloc::EmitVerboseDebuggingOutput() {
     code.MOV(X19, mcl::bit_cast<u64>(&PrintVerboseDebuggingOutputLine));  // Non-volatile register
 
     const auto do_location = [&](HostLocInfo& info, HostLocType type, size_t index) {
-        using namespace oaknut::util;
         for (const IR::Inst* value : info.values) {
             code.MOV(X0, SP);
             code.MOV(X1, static_cast<u64>(type));
@@ -257,16 +255,10 @@ void RegAlloc::EmitVerboseDebuggingOutput() {
         }
     };
 
-    for (size_t i = 0; i < gprs.size(); i++) {
-        do_location(gprs[i], HostLocType::X, i);
-    }
-    for (size_t i = 0; i < fprs.size(); i++) {
-        do_location(fprs[i], HostLocType::Q, i);
-    }
+    for (size_t i = 0, n = gprs.size(); i < n; ++i) do_location(gprs[i], HostLocType::X, i);
+    for (size_t i = 0, n = fprs.size(); i < n; ++i) do_location(fprs[i], HostLocType::Q, i);
     do_location(flags, HostLocType::Nzcv, 0);
-    for (size_t i = 0; i < spills.size(); i++) {
-        do_location(spills[i], HostLocType::Spill, i);
-    }
+    for (size_t i = 0, n = spills.size(); i < n; ++i) do_location(spills[i], HostLocType::Spill, i);
 }
 
 template<HostLoc::Kind kind>
@@ -329,7 +321,6 @@ int RegAlloc::RealizeReadImpl(const IR::Value& value) {
             break;
         case HostLoc::Kind::Fpr:
             code.FMOV(oaknut::XReg{new_location_index}, oaknut::DReg{current_location->index});
-            // ASSERT size fits
             break;
         case HostLoc::Kind::Spill:
             code.LDR(oaknut::XReg{new_location_index}, SP, spill_offset + current_location->index * spill_slot_size);
@@ -428,17 +419,34 @@ template int RegAlloc::RealizeReadWriteImpl<HostLoc::Kind::Fpr>(const IR::Value&
 template int RegAlloc::RealizeReadWriteImpl<HostLoc::Kind::Flags>(const IR::Value&, const IR::Inst*);
 
 int RegAlloc::AllocateRegister(const std::array<HostLocInfo, 32>& regs, const std::vector<int>& order) const {
-    const auto empty = std::find_if(order.begin(), order.end(), [&](int i) { return regs[i].IsCompletelyEmpty(); });
-    if (empty != order.end()) {
+    // Fast path: find a completely empty register
+    if (const auto empty = std::find_if(order.begin(), order.end(), [&](int i) { return regs[i].IsCompletelyEmpty(); }); empty != order.end()) {
         return *empty;
     }
 
+    // Collect allocatable candidates
     std::vector<int> candidates;
-    std::copy_if(order.begin(), order.end(), std::back_inserter(candidates), [&](int i) { return regs[i].MaybeAllocatable(); });
+    candidates.reserve(order.size());
+    for (int i : order) {
+        if (regs[i].MaybeAllocatable()) {
+            candidates.push_back(i);
+        }
+    }
 
-    // TODO: LRU
-    std::uniform_int_distribution<size_t> dis{0, candidates.size() - 1};
-    return candidates[dis(rand_gen)];
+    // Prefer LRU: pick the candidate with the lowest accumulated_uses
+    if (!candidates.empty()) {
+        auto lru = std::min_element(
+            candidates.begin(), candidates.end(),
+            [&](int a, int b) {
+                return regs[a].accumulated_uses < regs[b].accumulated_uses;
+            }
+        );
+        return *lru;
+    }
+
+    // Fallback: random selection (should not happen)
+    std::uniform_int_distribution<size_t> dis{0, order.size() - 1};
+    return order[dis(rand_gen)];
 }
 
 void RegAlloc::SpillGpr(int index) {
@@ -448,7 +456,8 @@ void RegAlloc::SpillGpr(int index) {
     }
     const int new_location_index = FindFreeSpill();
     code.STR(oaknut::XReg{index}, SP, spill_offset + new_location_index * spill_slot_size);
-    spills[new_location_index] = std::exchange(gprs[index], {});
+    spills[new_location_index] = std::move(gprs[index]);
+    gprs[index] = {};
 }
 
 void RegAlloc::SpillFpr(int index) {
@@ -458,7 +467,8 @@ void RegAlloc::SpillFpr(int index) {
     }
     const int new_location_index = FindFreeSpill();
     code.STR(oaknut::QReg{index}, SP, spill_offset + new_location_index * spill_slot_size);
-    spills[new_location_index] = std::exchange(fprs[index], {});
+    spills[new_location_index] = std::move(fprs[index]);
+    fprs[index] = {};
 }
 
 void RegAlloc::ReadWriteFlags(Argument& read, IR::Inst* write) {
@@ -500,13 +510,14 @@ void RegAlloc::SpillFlags() {
     const int new_location_index = AllocateRegister(gprs, gpr_order);
     SpillGpr(new_location_index);
     code.MRS(oaknut::XReg{new_location_index}, oaknut::SystemReg::NZCV);
-    gprs[new_location_index] = std::exchange(flags, {});
+    gprs[new_location_index] = std::move(flags);
+    flags = {};
 }
 
 int RegAlloc::FindFreeSpill() const {
     const auto iter = std::find_if(spills.begin(), spills.end(), [](const HostLocInfo& info) { return info.values.empty(); });
     ASSERT_MSG(iter != spills.end(), "All spill locations are full");
-    return static_cast<int>(iter - spills.begin());
+    return static_cast<int>(std::distance(spills.begin(), iter));
 }
 
 void RegAlloc::LoadCopyInto(const IR::Value& value, oaknut::XReg reg) {
@@ -523,7 +534,6 @@ void RegAlloc::LoadCopyInto(const IR::Value& value, oaknut::XReg reg) {
         break;
     case HostLoc::Kind::Fpr:
         code.FMOV(reg, oaknut::DReg{current_location->index});
-        // ASSERT size fits
         break;
     case HostLoc::Kind::Spill:
         code.LDR(reg, SP, spill_offset + current_location->index * spill_slot_size);
@@ -551,7 +561,6 @@ void RegAlloc::LoadCopyInto(const IR::Value& value, oaknut::QReg reg) {
         code.MOV(reg.B16(), oaknut::QReg{current_location->index}.B16());
         break;
     case HostLoc::Kind::Spill:
-        // TODO: Minimize move size to max value width
         code.LDR(reg, SP, spill_offset + current_location->index * spill_slot_size);
         break;
     case HostLoc::Kind::Flags:
@@ -564,16 +573,16 @@ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
     const auto contains_value = [value](const HostLocInfo& info) { return info.Contains(value); };
 
     if (const auto iter = std::find_if(gprs.begin(), gprs.end(), contains_value); iter != gprs.end()) {
-        return HostLoc{HostLoc::Kind::Gpr, static_cast<int>(iter - gprs.begin())};
+        return HostLoc{HostLoc::Kind::Gpr, static_cast<int>(std::distance(gprs.begin(), iter))};
     }
     if (const auto iter = std::find_if(fprs.begin(), fprs.end(), contains_value); iter != fprs.end()) {
-        return HostLoc{HostLoc::Kind::Fpr, static_cast<int>(iter - fprs.begin())};
+        return HostLoc{HostLoc::Kind::Fpr, static_cast<int>(std::distance(fprs.begin(), iter))};
     }
     if (contains_value(flags)) {
         return HostLoc{HostLoc::Kind::Flags, 0};
     }
     if (const auto iter = std::find_if(spills.begin(), spills.end(), contains_value); iter != spills.end()) {
-        return HostLoc{HostLoc::Kind::Spill, static_cast<int>(iter - spills.begin())};
+        return HostLoc{HostLoc::Kind::Spill, static_cast<int>(std::distance(spills.begin(), iter))};
     }
     return std::nullopt;
 }

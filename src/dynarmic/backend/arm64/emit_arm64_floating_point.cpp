@@ -4,6 +4,8 @@
  */
 
 #include <oaknut/oaknut.hpp>
+#include <type_traits>
+#include <utility>
 
 #include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/backend/arm64/abi.h"
@@ -20,19 +22,30 @@ namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
 
+// Helper to force inline for small templates
+#if defined(__GNUC__) || defined(__clang__)
+#define DYNARMIC_FORCE_INLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define DYNARMIC_FORCE_INLINE __forceinline
+#else
+#define DYNARMIC_FORCE_INLINE inline
+#endif
+
+// Use perfect forwarding for emit lambdas, and constexpr if for compile-time branching
+
 template<size_t bitsize, typename EmitFn>
-static void EmitTwoOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+DYNARMIC_FORCE_INLINE void EmitTwoOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Vresult = ctx.reg_alloc.WriteVec<bitsize>(inst);
     auto Voperand = ctx.reg_alloc.ReadVec<bitsize>(args[0]);
     RegAlloc::Realize(Vresult, Voperand);
     ctx.fpsr.Load();
 
-    emit(Vresult, Voperand);
+    std::forward<EmitFn>(emit)(Vresult, Voperand);
 }
 
 template<size_t bitsize, typename EmitFn>
-static void EmitThreeOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+DYNARMIC_FORCE_INLINE void EmitThreeOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Vresult = ctx.reg_alloc.WriteVec<bitsize>(inst);
     auto Va = ctx.reg_alloc.ReadVec<bitsize>(args[0]);
@@ -40,11 +53,11 @@ static void EmitThreeOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst
     RegAlloc::Realize(Vresult, Va, Vb);
     ctx.fpsr.Load();
 
-    emit(Vresult, Va, Vb);
+    std::forward<EmitFn>(emit)(Vresult, Va, Vb);
 }
 
 template<size_t bitsize, typename EmitFn>
-static void EmitFourOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+DYNARMIC_FORCE_INLINE void EmitFourOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Vresult = ctx.reg_alloc.WriteVec<bitsize>(inst);
     auto Va = ctx.reg_alloc.ReadVec<bitsize>(args[0]);
@@ -53,11 +66,11 @@ static void EmitFourOp(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst,
     RegAlloc::Realize(Vresult, Va, Vb, Vc);
     ctx.fpsr.Load();
 
-    emit(Vresult, Va, Vb, Vc);
+    std::forward<EmitFn>(emit)(Vresult, Va, Vb, Vc);
 }
 
 template<size_t bitsize_from, size_t bitsize_to, typename EmitFn>
-static void EmitConvert(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+DYNARMIC_FORCE_INLINE void EmitConvert(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Vto = ctx.reg_alloc.WriteVec<bitsize_to>(inst);
     auto Vfrom = ctx.reg_alloc.ReadVec<bitsize_from>(args[0]);
@@ -67,11 +80,11 @@ static void EmitConvert(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst
 
     ASSERT(rounding_mode == ctx.FPCR().RMode());
 
-    emit(Vto, Vfrom);
+    std::forward<EmitFn>(emit)(Vto, Vfrom);
 }
 
 template<size_t bitsize_from, size_t bitsize_to, bool is_signed>
-static void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+DYNARMIC_FORCE_INLINE void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Rto = ctx.reg_alloc.WriteReg<std::max<size_t>(bitsize_to, 32)>(inst);
     auto Vfrom = ctx.reg_alloc.ReadVec<bitsize_from>(args[0]);
@@ -85,7 +98,7 @@ static void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst*
             if constexpr (bitsize_to == 16) {
                 code.FCVTZS(Rto, Vfrom, fbits + 16);
                 code.ASR(Wscratch0, Rto, 31);
-                code.ADD(Rto, Rto, Wscratch0, LSR, 16);  // Round towards zero when truncating
+                code.ADD(Rto, Rto, Wscratch0, LSR, 16);
                 code.LSR(Rto, Rto, 16);
             } else if (fbits) {
                 code.FCVTZS(Rto, Vfrom, fbits);
@@ -158,7 +171,7 @@ static void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst*
 }
 
 template<size_t bitsize_from, size_t bitsize_to, typename EmitFn>
-static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+DYNARMIC_FORCE_INLINE void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Vto = ctx.reg_alloc.WriteVec<bitsize_to>(inst);
     auto Rfrom = ctx.reg_alloc.ReadReg<std::max<size_t>(bitsize_from, 32)>(args[0]);
@@ -168,7 +181,7 @@ static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Ins
     ctx.fpsr.Load();
 
     if (rounding_mode == ctx.FPCR().RMode()) {
-        emit(Vto, Rfrom, fbits);
+        std::forward<EmitFn>(emit)(Vto, Rfrom, static_cast<u8>(fbits));
     } else {
         FP::FPCR new_fpcr = ctx.FPCR();
         new_fpcr.RMode(rounding_mode);
@@ -176,43 +189,15 @@ static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Ins
         code.MOV(Wscratch0, new_fpcr.Value());
         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
 
-        emit(Vto, Rfrom, fbits);
+        std::forward<EmitFn>(emit)(Vto, Rfrom, static_cast<u8>(fbits));
 
         code.MOV(Wscratch0, ctx.FPCR().Value());
         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
     }
 }
 
-template<>
-void EmitIR<IR::Opcode::FPAbs16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPAbs32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FABS(Sresult, Soperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPAbs64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FABS(Dresult, Doperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FADD(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FADD(Dresult, Da, Db); });
-}
-
 template<size_t size>
-void EmitCompare(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+DYNARMIC_FORCE_INLINE void EmitCompare(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto flags = ctx.reg_alloc.WriteFlags(inst);
     auto Va = ctx.reg_alloc.ReadVec<size>(args[0]);
@@ -240,201 +225,92 @@ void EmitCompare(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) 
     }
 }
 
+// Macro to reduce boilerplate for simple two/three/four opcodes
+#define DYNARMIC_EMIT_TWO_OP(OP, SIZE, INSTR) \
+template<> \
+void EmitIR<IR::Opcode::OP>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    EmitTwoOp<SIZE>(code, ctx, inst, [&](auto& result, auto& operand) { code.INSTR(result, operand); }); \
+}
+
+#define DYNARMIC_EMIT_THREE_OP(OP, SIZE, INSTR) \
+template<> \
+void EmitIR<IR::Opcode::OP>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    EmitThreeOp<SIZE>(code, ctx, inst, [&](auto& result, auto& a, auto& b) { code.INSTR(result, a, b); }); \
+}
+
+#define DYNARMIC_EMIT_FOUR_OP(OP, SIZE, INSTR) \
+template<> \
+void EmitIR<IR::Opcode::OP>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    EmitFourOp<SIZE>(code, ctx, inst, [&](auto& result, auto& a, auto& b, auto& c) { code.INSTR(result, b, c, a); }); \
+}
+
+// Unimplemented stubs
+#define DYNARMIC_EMIT_UNIMPLEMENTED(OP) \
+template<> \
+void EmitIR<IR::Opcode::OP>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) { \
+    ASSERT_FALSE("Unimplemented"); \
+}
+
+// Two operand
+DYNARMIC_EMIT_UNIMPLEMENTED(FPAbs16)
+DYNARMIC_EMIT_TWO_OP(FPAbs32, 32, FABS)
+DYNARMIC_EMIT_TWO_OP(FPAbs64, 64, FABS)
+
+DYNARMIC_EMIT_THREE_OP(FPAdd32, 32, FADD)
+DYNARMIC_EMIT_THREE_OP(FPAdd64, 64, FADD)
+
 template<>
 void EmitIR<IR::Opcode::FPCompare32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitCompare<32>(code, ctx, inst);
 }
-
 template<>
 void EmitIR<IR::Opcode::FPCompare64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitCompare<64>(code, ctx, inst);
 }
 
-template<>
-void EmitIR<IR::Opcode::FPDiv32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FDIV(Sresult, Sa, Sb); });
-}
+DYNARMIC_EMIT_THREE_OP(FPDiv32, 32, FDIV)
+DYNARMIC_EMIT_THREE_OP(FPDiv64, 64, FDIV)
 
-template<>
-void EmitIR<IR::Opcode::FPDiv64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FDIV(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_THREE_OP(FPMax32, 32, FMAX)
+DYNARMIC_EMIT_THREE_OP(FPMax64, 64, FMAX)
+DYNARMIC_EMIT_THREE_OP(FPMaxNumeric32, 32, FMAXNM)
+DYNARMIC_EMIT_THREE_OP(FPMaxNumeric64, 64, FMAXNM)
+DYNARMIC_EMIT_THREE_OP(FPMin32, 32, FMIN)
+DYNARMIC_EMIT_THREE_OP(FPMin64, 64, FMIN)
+DYNARMIC_EMIT_THREE_OP(FPMinNumeric32, 32, FMINNM)
+DYNARMIC_EMIT_THREE_OP(FPMinNumeric64, 64, FMINNM)
 
-template<>
-void EmitIR<IR::Opcode::FPMax32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMAX(Sresult, Sa, Sb); });
-}
+DYNARMIC_EMIT_THREE_OP(FPMul32, 32, FMUL)
+DYNARMIC_EMIT_THREE_OP(FPMul64, 64, FMUL)
 
-template<>
-void EmitIR<IR::Opcode::FPMax64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMAX(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPMulAdd16)
+DYNARMIC_EMIT_FOUR_OP(FPMulAdd32, 32, FMADD)
+DYNARMIC_EMIT_FOUR_OP(FPMulAdd64, 64, FMADD)
 
-template<>
-void EmitIR<IR::Opcode::FPMaxNumeric32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMAXNM(Sresult, Sa, Sb); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPMulSub16)
+DYNARMIC_EMIT_FOUR_OP(FPMulSub32, 32, FMSUB)
+DYNARMIC_EMIT_FOUR_OP(FPMulSub64, 64, FMSUB)
 
-template<>
-void EmitIR<IR::Opcode::FPMaxNumeric64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMAXNM(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_THREE_OP(FPMulX32, 32, FMULX)
+DYNARMIC_EMIT_THREE_OP(FPMulX64, 64, FMULX)
 
-template<>
-void EmitIR<IR::Opcode::FPMin32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMIN(Sresult, Sa, Sb); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPNeg16)
+DYNARMIC_EMIT_TWO_OP(FPNeg32, 32, FNEG)
+DYNARMIC_EMIT_TWO_OP(FPNeg64, 64, FNEG)
 
-template<>
-void EmitIR<IR::Opcode::FPMin64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMIN(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRecipEstimate16)
+DYNARMIC_EMIT_TWO_OP(FPRecipEstimate32, 32, FRECPE)
+DYNARMIC_EMIT_TWO_OP(FPRecipEstimate64, 64, FRECPE)
 
-template<>
-void EmitIR<IR::Opcode::FPMinNumeric32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMINNM(Sresult, Sa, Sb); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRecipExponent16)
+DYNARMIC_EMIT_TWO_OP(FPRecipExponent32, 32, FRECPX)
+DYNARMIC_EMIT_TWO_OP(FPRecipExponent64, 64, FRECPX)
 
-template<>
-void EmitIR<IR::Opcode::FPMinNumeric64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMINNM(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRecipStepFused16)
+DYNARMIC_EMIT_THREE_OP(FPRecipStepFused32, 32, FRECPS)
+DYNARMIC_EMIT_THREE_OP(FPRecipStepFused64, 64, FRECPS)
 
-template<>
-void EmitIR<IR::Opcode::FPMul32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMUL(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMul64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMUL(Dresult, Da, Db); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFourOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& S1, auto& S2) { code.FMADD(Sresult, S1, S2, Sa); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFourOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& D1, auto& D2) { code.FMADD(Dresult, D1, D2, Da); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFourOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& S1, auto& S2) { code.FMSUB(Sresult, S1, S2, Sa); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFourOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& D1, auto& D2) { code.FMSUB(Dresult, D1, D2, Da); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulX32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FMULX(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPMulX64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FMULX(Dresult, Da, Db); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPNeg16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPNeg32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FNEG(Sresult, Soperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPNeg64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FNEG(Dresult, Doperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipEstimate16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipEstimate32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FRECPE(Sresult, Soperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipEstimate64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FRECPE(Dresult, Doperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipExponent16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipExponent32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FRECPX(Sresult, Soperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipExponent64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FRECPX(Dresult, Doperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipStepFused16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipStepFused32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FRECPS(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRecipStepFused64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FRECPS(Dresult, Da, Db); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRoundInt16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRoundInt16)
 
 template<>
 void EmitIR<IR::Opcode::FPRoundInt32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
@@ -510,87 +386,40 @@ void EmitIR<IR::Opcode::FPRoundInt64>(oaknut::CodeGenerator& code, EmitContext& 
     }
 }
 
-template<>
-void EmitIR<IR::Opcode::FPRSqrtEstimate16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRSqrtEstimate16)
+DYNARMIC_EMIT_TWO_OP(FPRSqrtEstimate32, 32, FRSQRTE)
+DYNARMIC_EMIT_TWO_OP(FPRSqrtEstimate64, 64, FRSQRTE)
 
-template<>
-void EmitIR<IR::Opcode::FPRSqrtEstimate32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FRSQRTE(Sresult, Soperand); });
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPRSqrtStepFused16)
+DYNARMIC_EMIT_THREE_OP(FPRSqrtStepFused32, 32, FRSQRTS)
+DYNARMIC_EMIT_THREE_OP(FPRSqrtStepFused64, 64, FRSQRTS)
 
-template<>
-void EmitIR<IR::Opcode::FPRSqrtEstimate64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FRSQRTE(Dresult, Doperand); });
-}
+DYNARMIC_EMIT_TWO_OP(FPSqrt32, 32, FSQRT)
+DYNARMIC_EMIT_TWO_OP(FPSqrt64, 64, FSQRT)
 
-template<>
-void EmitIR<IR::Opcode::FPRSqrtStepFused16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRSqrtStepFused32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FRSQRTS(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPRSqrtStepFused64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FRSQRTS(Dresult, Da, Db); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSqrt32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Soperand) { code.FSQRT(Sresult, Soperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSqrt64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitTwoOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Doperand) { code.FSQRT(Dresult, Doperand); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<32>(code, ctx, inst, [&](auto& Sresult, auto& Sa, auto& Sb) { code.FSUB(Sresult, Sa, Sb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitThreeOp<64>(code, ctx, inst, [&](auto& Dresult, auto& Da, auto& Db) { code.FSUB(Dresult, Da, Db); });
-}
+DYNARMIC_EMIT_THREE_OP(FPSub32, 32, FSUB)
+DYNARMIC_EMIT_THREE_OP(FPSub64, 64, FSUB)
 
 template<>
 void EmitIR<IR::Opcode::FPHalfToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitConvert<16, 64>(code, ctx, inst, [&](auto& Dto, auto& Hfrom) { code.FCVT(Dto, Hfrom); });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPHalfToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitConvert<16, 32>(code, ctx, inst, [&](auto& Sto, auto& Hfrom) { code.FCVT(Sto, Hfrom); });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPSingleToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitConvert<32, 64>(code, ctx, inst, [&](auto& Dto, auto& Sfrom) { code.FCVT(Dto, Sfrom); });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPSingleToHalf>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitConvert<32, 16>(code, ctx, inst, [&](auto& Hto, auto& Sfrom) { code.FCVT(Hto, Sfrom); });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPDoubleToHalf>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitConvert<64, 16>(code, ctx, inst, [&](auto& Hto, auto& Dfrom) { code.FCVT(Hto, Dfrom); });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPDoubleToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const auto rounding_mode = static_cast<FP::RoundingMode>(inst->GetArg(1).GetU8());
@@ -603,124 +432,32 @@ void EmitIR<IR::Opcode::FPDoubleToSingle>(oaknut::CodeGenerator& code, EmitConte
         ctx.fpsr.Load();
 
         code.FCVTXN(Sto, Dfrom);
-
         return;
     }
 
     EmitConvert<64, 32>(code, ctx, inst, [&](auto& Sto, auto& Dfrom) { code.FCVT(Sto, Dfrom); });
 }
 
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<64, 16, true>(code, ctx, inst);
-}
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 16, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 32, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 64, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedU16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 16, false>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 32, false>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPDoubleToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<64, 64, false>(code, ctx, inst); }
 
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<64, 32, true>(code, ctx, inst);
-}
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedS16)
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedS32)
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedS64)
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedU16)
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedU32)
+DYNARMIC_EMIT_UNIMPLEMENTED(FPHalfToFixedU64)
 
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitToFixed<64, 64, true>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedU16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<64, 16, false>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<64, 32, false>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPDoubleToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitToFixed<64, 64, false>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedU16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPHalfToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    ASSERT_FALSE("Unimplemented");
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<32, 16, true>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitToFixed<32, 32, true>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<32, 64, true>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedU16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<32, 16, false>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitToFixed<32, 32, false>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::FPSingleToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitToFixed<32, 64, false>(code, ctx, inst);
-}
+template<> void EmitIR<IR::Opcode::FPSingleToFixedS16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 16, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPSingleToFixedS32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 32, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPSingleToFixedS64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 64, true>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPSingleToFixedU16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 16, false>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPSingleToFixedU32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 32, false>(code, ctx, inst); }
+template<> void EmitIR<IR::Opcode::FPSingleToFixedU64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { EmitToFixed<32, 64, false>(code, ctx, inst); }
 
 template<>
 void EmitIR<IR::Opcode::FPFixedU16ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
@@ -729,7 +466,6 @@ void EmitIR<IR::Opcode::FPFixedU16ToSingle>(oaknut::CodeGenerator& code, EmitCon
         code.UCVTF(Sto, Wscratch0, fbits + 16);
     });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS16ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitFromFixed<16, 32>(code, ctx, inst, [&](auto& Sto, auto& Wfrom, u8 fbits) {
@@ -737,7 +473,6 @@ void EmitIR<IR::Opcode::FPFixedS16ToSingle>(oaknut::CodeGenerator& code, EmitCon
         code.SCVTF(Sto, Wscratch0, fbits + 16);
     });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedU16ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitFromFixed<16, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) {
@@ -745,7 +480,6 @@ void EmitIR<IR::Opcode::FPFixedU16ToDouble>(oaknut::CodeGenerator& code, EmitCon
         code.UCVTF(Dto, Wscratch0, fbits + 16);
     });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS16ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     EmitFromFixed<16, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) {
@@ -753,49 +487,83 @@ void EmitIR<IR::Opcode::FPFixedS16ToDouble>(oaknut::CodeGenerator& code, EmitCon
         code.SCVTF(Dto, Wscratch0, fbits + 16);
     });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedU32ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitFromFixed<32, 32>(code, ctx, inst, [&](auto& Sto, auto& Wfrom, u8 fbits) { fbits ? code.UCVTF(Sto, Wfrom, fbits) : code.UCVTF(Sto, Wfrom); });
+    EmitFromFixed<32, 32>(code, ctx, inst, [&](auto& Sto, auto& Wfrom, u8 fbits) {
+        if (fbits)
+            code.UCVTF(Sto, Wfrom, fbits);
+        else
+            code.UCVTF(Sto, Wfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS32ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitFromFixed<32, 32>(code, ctx, inst, [&](auto& Sto, auto& Wfrom, u8 fbits) { fbits ? code.SCVTF(Sto, Wfrom, fbits) : code.SCVTF(Sto, Wfrom); });
+    EmitFromFixed<32, 32>(code, ctx, inst, [&](auto& Sto, auto& Wfrom, u8 fbits) {
+        if (fbits)
+            code.SCVTF(Sto, Wfrom, fbits);
+        else
+            code.SCVTF(Sto, Wfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedU32ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFromFixed<32, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) { fbits ? code.UCVTF(Dto, Wfrom, fbits) : code.UCVTF(Dto, Wfrom); });
+    EmitFromFixed<32, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) {
+        if (fbits)
+            code.UCVTF(Dto, Wfrom, fbits);
+        else
+            code.UCVTF(Dto, Wfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS32ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFromFixed<32, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) { fbits ? code.SCVTF(Dto, Wfrom, fbits) : code.SCVTF(Dto, Wfrom); });
+    EmitFromFixed<32, 64>(code, ctx, inst, [&](auto& Dto, auto& Wfrom, u8 fbits) {
+        if (fbits)
+            code.SCVTF(Dto, Wfrom, fbits);
+        else
+            code.SCVTF(Dto, Wfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedU64ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitFromFixed<64, 64>(code, ctx, inst, [&](auto& Dto, auto& Xfrom, u8 fbits) { fbits ? code.UCVTF(Dto, Xfrom, fbits) : code.UCVTF(Dto, Xfrom); });
+    EmitFromFixed<64, 64>(code, ctx, inst, [&](auto& Dto, auto& Xfrom, u8 fbits) {
+        if (fbits)
+            code.UCVTF(Dto, Xfrom, fbits);
+        else
+            code.UCVTF(Dto, Xfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedU64ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFromFixed<64, 32>(code, ctx, inst, [&](auto& Sto, auto& Xfrom, u8 fbits) { fbits ? code.UCVTF(Sto, Xfrom, fbits) : code.UCVTF(Sto, Xfrom); });
+    EmitFromFixed<64, 32>(code, ctx, inst, [&](auto& Sto, auto& Xfrom, u8 fbits) {
+        if (fbits)
+            code.UCVTF(Sto, Xfrom, fbits);
+        else
+            code.UCVTF(Sto, Xfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS64ToDouble>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    // TODO: Consider fpr source
-    EmitFromFixed<64, 64>(code, ctx, inst, [&](auto& Dto, auto& Xfrom, u8 fbits) { fbits ? code.SCVTF(Dto, Xfrom, fbits) : code.SCVTF(Dto, Xfrom); });
+    EmitFromFixed<64, 64>(code, ctx, inst, [&](auto& Dto, auto& Xfrom, u8 fbits) {
+        if (fbits)
+            code.SCVTF(Dto, Xfrom, fbits);
+        else
+            code.SCVTF(Dto, Xfrom);
+    });
 }
-
 template<>
 void EmitIR<IR::Opcode::FPFixedS64ToSingle>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitFromFixed<64, 32>(code, ctx, inst, [&](auto& Sto, auto& Xfrom, u8 fbits) { fbits ? code.SCVTF(Sto, Xfrom, fbits) : code.SCVTF(Sto, Xfrom); });
+    EmitFromFixed<64, 32>(code, ctx, inst, [&](auto& Sto, auto& Xfrom, u8 fbits) {
+        if (fbits)
+            code.SCVTF(Sto, Xfrom, fbits);
+        else
+            code.SCVTF(Sto, Xfrom);
+    });
 }
+
+#undef DYNARMIC_EMIT_TWO_OP
+#undef DYNARMIC_EMIT_THREE_OP
+#undef DYNARMIC_EMIT_FOUR_OP
+#undef DYNARMIC_EMIT_UNIMPLEMENTED
+#undef DYNARMIC_FORCE_INLINE
 
 }  // namespace Dynarmic::Backend::Arm64

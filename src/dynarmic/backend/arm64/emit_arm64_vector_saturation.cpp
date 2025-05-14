@@ -21,106 +21,60 @@ namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
 
-template<size_t size, typename EmitFn>
-static void Emit(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-    auto Qresult = ctx.reg_alloc.WriteQ(inst);
-    auto Qa = ctx.reg_alloc.ReadQ(args[0]);
-    auto Qb = ctx.reg_alloc.ReadQ(args[1]);
-    RegAlloc::Realize(Qresult, Qa, Qb);
-    ctx.fpsr.Load();
-
+// Helper to map element size to vector type member function
+template<size_t size>
+constexpr auto GetVectorType(auto* reg) {
     if constexpr (size == 8) {
-        emit(Qresult->B16(), Qa->B16(), Qb->B16());
+        return reg->B16();
     } else if constexpr (size == 16) {
-        emit(Qresult->H8(), Qa->H8(), Qb->H8());
+        return reg->H8();
     } else if constexpr (size == 32) {
-        emit(Qresult->S4(), Qa->S4(), Qb->S4());
+        return reg->S4();
     } else if constexpr (size == 64) {
-        emit(Qresult->D2(), Qa->D2(), Qb->D2());
+        return reg->D2();
     } else {
-        static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
+        static_assert(Common::always_false_v<mcl::mp::lift_value<size>>, "Invalid vector element size");
     }
 }
 
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedAdd8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
+// Generalized Emit function for vector saturated ops
+template<size_t size, typename EmitFn>
+inline void Emit(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
+    const auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto* Qresult = ctx.reg_alloc.WriteQ(inst);
+    auto* Qa = ctx.reg_alloc.ReadQ(args[0]);
+    auto* Qb = ctx.reg_alloc.ReadQ(args[1]);
+    RegAlloc::Realize(Qresult, Qa, Qb);
+    ctx.fpsr.Load();
+
+    emit(GetVectorType<size>(Qresult), GetVectorType<size>(Qa), GetVectorType<size>(Qb));
 }
 
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
+// Macro to reduce boilerplate for similar opcodes
+#define DEFINE_VECTOR_SATURATED_OP(OPCODE, MNEMONIC, SIZE) \
+template<> \
+void EmitIR<IR::Opcode::OPCODE##8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    Emit<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.MNEMONIC(Vresult, Va, Vb); }); \
+} \
+template<> \
+void EmitIR<IR::Opcode::OPCODE##16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    Emit<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.MNEMONIC(Vresult, Va, Vb); }); \
+} \
+template<> \
+void EmitIR<IR::Opcode::OPCODE##32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    Emit<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.MNEMONIC(Vresult, Va, Vb); }); \
+} \
+template<> \
+void EmitIR<IR::Opcode::OPCODE##64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+    Emit<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.MNEMONIC(Vresult, Va, Vb); }); \
 }
 
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
-}
+// Use macro for all saturated vector ops
+DEFINE_VECTOR_SATURATED_OP(VectorSignedSaturatedAdd, SQADD, 8)
+DEFINE_VECTOR_SATURATED_OP(VectorSignedSaturatedSub, SQSUB, 8)
+DEFINE_VECTOR_SATURATED_OP(VectorUnsignedSaturatedAdd, UQADD, 8)
+DEFINE_VECTOR_SATURATED_OP(VectorUnsignedSaturatedSub, UQSUB, 8)
 
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQADD(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedSub8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorSignedSaturatedSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedAdd8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedAdd16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedAdd32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedAdd64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQADD(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedSub8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<8>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedSub16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<16>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedSub32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
-}
-
-template<>
-void EmitIR<IR::Opcode::VectorUnsignedSaturatedSub64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    Emit<64>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.UQSUB(Vresult, Va, Vb); });
-}
+#undef DEFINE_VECTOR_SATURATED_OP
 
 }  // namespace Dynarmic::Backend::Arm64

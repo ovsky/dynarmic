@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <array>
+#include <type_traits>
+#include <utility>
 #include <mcl/bit_cast.hpp>
 #include <mcl/mp/metavalue/lift_value.hpp>
 #include <mcl/mp/typelist/cartesian_product.hpp>
@@ -40,27 +43,24 @@ namespace mp = mcl::mp;
 
 using A64FullVectorWidth = std::integral_constant<size_t, 128>;
 
-// Array alias that always sizes itself according to the given type T
-// relative to the size of a vector register. e.g. T = u32 would result
-// in a std::array<u32, 4>.
 template<typename T>
 using VectorArray = std::array<T, A64FullVectorWidth::value / mcl::bitsizeof<T>>;
 
 template<typename EmitFn>
-static void MaybeStandardFPSCRValue(oaknut::CodeGenerator& code, EmitContext& ctx, bool fpcr_controlled, EmitFn emit) {
+inline void MaybeStandardFPSCRValue(oaknut::CodeGenerator& code, EmitContext& ctx, bool fpcr_controlled, EmitFn&& emit) {
     if (ctx.FPCR(fpcr_controlled) != ctx.FPCR()) {
         code.MOV(Wscratch0, ctx.FPCR(fpcr_controlled).Value());
         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
-        emit();
+        std::forward<EmitFn>(emit)();
         code.MOV(Wscratch0, ctx.FPCR().Value());
         code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
     } else {
-        emit();
+        std::forward<EmitFn>(emit)();
     }
 }
 
 template<typename EmitFn>
-static void EmitTwoOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitTwoOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qresult = ctx.reg_alloc.WriteQ(inst);
     auto Qa = ctx.reg_alloc.ReadQ(args[0]);
@@ -68,18 +68,18 @@ static void EmitTwoOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* i
     RegAlloc::Realize(Qresult, Qa);
     ctx.fpsr.Load();
 
-    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { emit(Qresult, Qa); });
+    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { std::forward<EmitFn>(emit)(Qresult, Qa); });
 }
 
 template<size_t size, typename EmitFn>
-static void EmitTwoOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitTwoOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     EmitTwoOp(code, ctx, inst, [&](auto& Qresult, auto& Qa) {
         if constexpr (size == 16) {
-            emit(Qresult->H8(), Qa->H8());
+            std::forward<EmitFn>(emit)(Qresult->H8(), Qa->H8());
         } else if constexpr (size == 32) {
-            emit(Qresult->S4(), Qa->S4());
+            std::forward<EmitFn>(emit)(Qresult->S4(), Qa->S4());
         } else if constexpr (size == 64) {
-            emit(Qresult->D2(), Qa->D2());
+            std::forward<EmitFn>(emit)(Qresult->D2(), Qa->D2());
         } else {
             static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
         }
@@ -87,7 +87,7 @@ static void EmitTwoOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, IR:
 }
 
 template<typename EmitFn>
-static void EmitThreeOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitThreeOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qresult = ctx.reg_alloc.WriteQ(inst);
     auto Qa = ctx.reg_alloc.ReadQ(args[0]);
@@ -96,18 +96,18 @@ static void EmitThreeOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst*
     RegAlloc::Realize(Qresult, Qa, Qb);
     ctx.fpsr.Load();
 
-    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { emit(Qresult, Qa, Qb); });
+    MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] { std::forward<EmitFn>(emit)(Qresult, Qa, Qb); });
 }
 
 template<size_t size, typename EmitFn>
-static void EmitThreeOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitThreeOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     EmitThreeOp(code, ctx, inst, [&](auto& Qresult, auto& Qa, auto& Qb) {
         if constexpr (size == 16) {
-            emit(Qresult->H8(), Qa->H8(), Qb->H8());
+            std::forward<EmitFn>(emit)(Qresult->H8(), Qa->H8(), Qb->H8());
         } else if constexpr (size == 32) {
-            emit(Qresult->S4(), Qa->S4(), Qb->S4());
+            std::forward<EmitFn>(emit)(Qresult->S4(), Qa->S4(), Qb->S4());
         } else if constexpr (size == 64) {
-            emit(Qresult->D2(), Qa->D2(), Qb->D2());
+            std::forward<EmitFn>(emit)(Qresult->D2(), Qa->D2(), Qb->D2());
         } else {
             static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
         }
@@ -115,7 +115,7 @@ static void EmitThreeOpArranged(oaknut::CodeGenerator& code, EmitContext& ctx, I
 }
 
 template<size_t size, typename EmitFn>
-static void EmitFMA(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitFMA(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qresult = ctx.reg_alloc.ReadWriteQ(args[0], inst);
     auto Qm = ctx.reg_alloc.ReadQ(args[1]);
@@ -126,11 +126,11 @@ static void EmitFMA(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* ins
 
     MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] {
         if constexpr (size == 16) {
-            emit(Qresult->H8(), Qm->H8(), Qn->H8());
+            std::forward<EmitFn>(emit)(Qresult->H8(), Qm->H8(), Qn->H8());
         } else if constexpr (size == 32) {
-            emit(Qresult->S4(), Qm->S4(), Qn->S4());
+            std::forward<EmitFn>(emit)(Qresult->S4(), Qm->S4(), Qn->S4());
         } else if constexpr (size == 64) {
-            emit(Qresult->D2(), Qm->D2(), Qn->D2());
+            std::forward<EmitFn>(emit)(Qresult->D2(), Qm->D2(), Qn->D2());
         } else {
             static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
         }
@@ -138,7 +138,7 @@ static void EmitFMA(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* ins
 }
 
 template<size_t size, typename EmitFn>
-static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn emit) {
+inline void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, EmitFn&& emit) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qto = ctx.reg_alloc.WriteQ(inst);
     auto Qfrom = ctx.reg_alloc.ReadQ(args[0]);
@@ -150,9 +150,9 @@ static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Ins
 
     MaybeStandardFPSCRValue(code, ctx, fpcr_controlled, [&] {
         if constexpr (size == 32) {
-            emit(Qto->S4(), Qfrom->S4(), fbits);
+            std::forward<EmitFn>(emit)(Qto->S4(), Qfrom->S4(), fbits);
         } else if constexpr (size == 64) {
-            emit(Qto->D2(), Qfrom->D2(), fbits);
+            std::forward<EmitFn>(emit)(Qto->D2(), Qfrom->D2(), fbits);
         } else {
             static_assert(Common::always_false_v<mcl::mp::lift_value<size>>);
         }
@@ -160,7 +160,7 @@ static void EmitFromFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Ins
 }
 
 template<size_t fsize, bool is_signed>
-void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+inline void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qto = ctx.reg_alloc.WriteQ(inst);
     auto Qfrom = ctx.reg_alloc.ReadQ(args[0]);
@@ -260,7 +260,7 @@ void EmitToFixed(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) 
 }
 
 template<typename Lambda>
-static void EmitTwoOpFallbackWithoutRegAlloc(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::QReg Qresult, oaknut::QReg Qarg1, Lambda lambda, bool fpcr_controlled) {
+inline void EmitTwoOpFallbackWithoutRegAlloc(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::QReg Qresult, oaknut::QReg Qarg1, Lambda lambda, bool fpcr_controlled) {
     const auto fn = static_cast<mcl::equivalent_function_type<Lambda>*>(lambda);
 
     const u32 fpcr = ctx.FPCR(fpcr_controlled).Value();
@@ -281,7 +281,7 @@ static void EmitTwoOpFallbackWithoutRegAlloc(oaknut::CodeGenerator& code, EmitCo
 }
 
 template<size_t fpcr_controlled_arg_index = 1, typename Lambda>
-static void EmitTwoOpFallback(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, Lambda lambda) {
+inline void EmitTwoOpFallback(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, Lambda lambda) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     auto Qarg1 = ctx.reg_alloc.ReadQ(args[0]);
     auto Qresult = ctx.reg_alloc.WriteQ(inst);
@@ -292,6 +292,8 @@ static void EmitTwoOpFallback(oaknut::CodeGenerator& code, EmitContext& ctx, IR:
     const bool fpcr_controlled = args[fpcr_controlled_arg_index].GetImmediateU1();
     EmitTwoOpFallbackWithoutRegAlloc(code, ctx, Qresult, Qarg1, lambda, fpcr_controlled);
 }
+
+// --- Opcode Implementations ---
 
 template<>
 void EmitIR<IR::Opcode::FPVectorAbs16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {

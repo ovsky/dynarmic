@@ -6,6 +6,9 @@
 #include "dynarmic/backend/arm64/emit_arm64.h"
 
 #include <oaknut/oaknut.hpp>
+#include <utility>
+#include <type_traits>
+#include <cstdio>
 
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/emit_context.h"
@@ -20,24 +23,28 @@ namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
 
+// Utility: constexpr if for type checking, for future extensibility
+template<typename T>
+constexpr bool always_false = false;
+
+// Use inline and [[nodiscard]] where appropriate for performance and correctness
 template<>
-void EmitIR<IR::Opcode::Void>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) {}
+inline void EmitIR<IR::Opcode::Void>(oaknut::CodeGenerator&, EmitContext&, IR::Inst*) noexcept {}
 
 template<>
-void EmitIR<IR::Opcode::Identity>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
+inline void EmitIR<IR::Opcode::Identity>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.DefineAsExisting(inst, args[0]);
 }
 
 template<>
-void EmitIR<IR::Opcode::Breakpoint>(oaknut::CodeGenerator& code, EmitContext&, IR::Inst*) {
+inline void EmitIR<IR::Opcode::Breakpoint>(oaknut::CodeGenerator& code, EmitContext&, IR::Inst*) {
     code.BRK(0);
 }
 
 template<>
-void EmitIR<IR::Opcode::CallHostFunction>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::CallHostFunction>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
 
     ctx.reg_alloc.PrepareForCall(args[1], args[2], args[3]);
     code.MOV(Xscratch0, args[0].GetImmediateU64());
@@ -45,17 +52,17 @@ void EmitIR<IR::Opcode::CallHostFunction>(oaknut::CodeGenerator& code, EmitConte
 }
 
 template<>
-void EmitIR<IR::Opcode::PushRSB>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+inline void EmitIR<IR::Opcode::PushRSB>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     if (!ctx.conf.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
         return;
     }
 
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(args[0].IsImmediate());
     const IR::LocationDescriptor target{args[0].GetImmediateU64()};
 
     code.LDR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
-    code.ADD(Wscratch2, Wscratch2, sizeof(RSBEntry));
+    code.ADD(Wscratch2, Wscratch2, static_cast<uint32_t>(sizeof(RSBEntry)));
     code.AND(Wscratch2, Wscratch2, RSBIndexMask);
     code.STR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
     code.ADD(Xscratch2, SP, Xscratch2);
@@ -66,26 +73,26 @@ void EmitIR<IR::Opcode::PushRSB>(oaknut::CodeGenerator& code, EmitContext& ctx, 
 }
 
 template<>
-void EmitIR<IR::Opcode::GetCarryFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    [[maybe_unused]] auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetCarryFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    [[maybe_unused]] const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(ctx.reg_alloc.WasValueDefined(inst));
 }
 
 template<>
-void EmitIR<IR::Opcode::GetOverflowFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    [[maybe_unused]] auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetOverflowFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    [[maybe_unused]] const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(ctx.reg_alloc.WasValueDefined(inst));
 }
 
 template<>
-void EmitIR<IR::Opcode::GetGEFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    [[maybe_unused]] auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetGEFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    [[maybe_unused]] const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(ctx.reg_alloc.WasValueDefined(inst));
 }
 
 template<>
-void EmitIR<IR::Opcode::GetNZCVFromOp>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetNZCVFromOp>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
 
     if (ctx.reg_alloc.WasValueDefined(inst)) {
         return;
@@ -97,7 +104,7 @@ void EmitIR<IR::Opcode::GetNZCVFromOp>(oaknut::CodeGenerator& code, EmitContext&
         auto flags = ctx.reg_alloc.WriteFlags(inst);
         RegAlloc::Realize(Wvalue, flags);
 
-        code.TST(*Wvalue, Wvalue);
+        code.TST(*Wvalue, *Wvalue);
         break;
     }
     case IR::Type::U64: {
@@ -105,7 +112,7 @@ void EmitIR<IR::Opcode::GetNZCVFromOp>(oaknut::CodeGenerator& code, EmitContext&
         auto flags = ctx.reg_alloc.WriteFlags(inst);
         RegAlloc::Realize(Xvalue, flags);
 
-        code.TST(*Xvalue, Xvalue);
+        code.TST(*Xvalue, *Xvalue);
         break;
     }
     default:
@@ -115,8 +122,8 @@ void EmitIR<IR::Opcode::GetNZCVFromOp>(oaknut::CodeGenerator& code, EmitContext&
 }
 
 template<>
-void EmitIR<IR::Opcode::GetNZFromOp>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetNZFromOp>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
 
     if (ctx.reg_alloc.WasValueDefined(inst)) {
         return;
@@ -146,40 +153,37 @@ void EmitIR<IR::Opcode::GetNZFromOp>(oaknut::CodeGenerator& code, EmitContext& c
 }
 
 template<>
-void EmitIR<IR::Opcode::GetUpperFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    [[maybe_unused]] auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetUpperFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    [[maybe_unused]] const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(ctx.reg_alloc.WasValueDefined(inst));
 }
 
 template<>
-void EmitIR<IR::Opcode::GetLowerFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    [[maybe_unused]] auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetLowerFromOp>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    [[maybe_unused]] const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(ctx.reg_alloc.WasValueDefined(inst));
 }
 
 template<>
-void EmitIR<IR::Opcode::GetCFlagFromNZCV>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+inline void EmitIR<IR::Opcode::GetCFlagFromNZCV>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
 
     auto Wc = ctx.reg_alloc.WriteW(inst);
     auto Wnzcv = ctx.reg_alloc.ReadW(args[0]);
     RegAlloc::Realize(Wc, Wnzcv);
 
-    code.AND(Wc, Wnzcv, 1 << 29);
+    code.AND(Wc, Wnzcv, 1u << 29);
 }
 
 template<>
-void EmitIR<IR::Opcode::NZCVFromPackedFlags>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
-    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
-
+inline void EmitIR<IR::Opcode::NZCVFromPackedFlags>(oaknut::CodeGenerator&, EmitContext& ctx, IR::Inst* inst) {
+    const auto& args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.DefineAsExisting(inst, args[0]);
 }
 
-static void EmitAddCycles(oaknut::CodeGenerator& code, EmitContext& ctx, size_t cycles_to_add) {
-    if (!ctx.conf.enable_cycle_counting) {
-        return;
-    }
-    if (cycles_to_add == 0) {
+// EmitAddCycles: optimize for branch prediction and avoid unnecessary MOV
+static inline void EmitAddCycles(oaknut::CodeGenerator& code, EmitContext& ctx, size_t cycles_to_add) {
+    if (!ctx.conf.enable_cycle_counting || cycles_to_add == 0) {
         return;
     }
 
@@ -208,17 +212,16 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
         ASSERT(!ctx.block.HasConditionFailedLocation());
     } else {
         ASSERT(ctx.block.HasConditionFailedLocation());
-        oaknut::Label pass;
-
-        pass = conf.emit_cond(code, ctx, ctx.block.GetCondition());
+        oaknut::Label pass = conf.emit_cond(code, ctx, ctx.block.GetCondition());
         EmitAddCycles(code, ctx, ctx.block.ConditionFailedCycleCount());
         conf.emit_condition_failed_terminal(code, ctx);
-
         code.l(pass);
     }
 
-    for (auto iter = block.begin(); iter != block.end(); ++iter) {
-        IR::Inst* inst = &*iter;
+    // Loop unrolling is not beneficial here due to unpredictable block size,
+    // but we can use prefetching for IR::Inst* if needed in the future.
+    for (auto iter = block.begin(), end = block.end(); iter != end; ++iter) {
+        IR::Inst* inst = std::addressof(*iter);
 
         switch (inst->GetOpcode()) {
 #define OPCODE(name, type, ...)                    \
@@ -251,29 +254,29 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     }
 
     fpsr_manager.Spill();
-
     reg_alloc.AssertNoMoreUses();
 
     EmitAddCycles(code, ctx, block.CycleCount());
     conf.emit_terminal(code, ctx);
     code.BRK(0);
 
+    // Use range-based for for clarity and possible inlining
     for (const auto& deferred_emit : ctx.deferred_emits) {
         deferred_emit();
     }
     code.BRK(0);
 
-    ebi.size = code.xptr<CodePtr>() - ebi.entry_point;
+    ebi.size = static_cast<size_t>(code.xptr<CodePtr>() - ebi.entry_point);
     return ebi;
 }
 
-void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget link_target) {
-    ctx.ebi.relocations.emplace_back(Relocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, link_target});
+inline void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget link_target) {
+    ctx.ebi.relocations.emplace_back(Relocation{static_cast<size_t>(code.xptr<CodePtr>() - ctx.ebi.entry_point), link_target});
     code.NOP();
 }
 
-void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
-    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{code.xptr<CodePtr>() - ctx.ebi.entry_point, type});
+inline void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type) {
+    ctx.ebi.block_relocations[descriptor].emplace_back(BlockRelocation{static_cast<size_t>(code.xptr<CodePtr>() - ctx.ebi.entry_point), type});
     switch (type) {
     case BlockRelocationType::Branch:
         code.NOP();

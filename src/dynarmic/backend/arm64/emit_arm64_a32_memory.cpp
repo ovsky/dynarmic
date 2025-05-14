@@ -19,89 +19,70 @@ namespace Dynarmic::Backend::Arm64 {
 
 using namespace oaknut::util;
 
+// Helper to reduce template boilerplate and improve inlining
+template<size_t Bits, typename F>
+inline void DispatchMemoryOp(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, F&& func) {
+    if constexpr (Bits == 8) {
+        func.template operator()<8>(code, ctx, inst);
+    } else if constexpr (Bits == 16) {
+        func.template operator()<16>(code, ctx, inst);
+    } else if constexpr (Bits == 32) {
+        func.template operator()<32>(code, ctx, inst);
+    } else if constexpr (Bits == 64) {
+        func.template operator()<64>(code, ctx, inst);
+    }
+}
+
+// Use always_inline to encourage inlining for these tiny wrappers
 template<>
+__attribute__((always_inline))
 void EmitIR<IR::Opcode::A32ClearExclusive>(oaknut::CodeGenerator& code, EmitContext&, IR::Inst*) {
-    code.STR(WZR, Xstate, offsetof(A32JitState, exclusive_state));
+    // Use STR WZR, [Xstate, #offsetof(A32JitState, exclusive_state)]
+    // This is already optimal, but let's ensure offset is constexpr
+    constexpr auto offset = offsetof(A32JitState, exclusive_state);
+    code.STR(WZR, Xstate, offset);
 }
 
-template<>
-void EmitIR<IR::Opcode::A32ReadMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitReadMemory<8>(code, ctx, inst);
-}
+// Macro to generate the repetitive template specializations for memory ops
+#define EMIT_MEMORY_OP(OPCODE, FUNC) \
+    template<> \
+    __attribute__((always_inline)) \
+    void EmitIR<IR::Opcode::OPCODE>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+        FUNC(code, ctx, inst); \
+    }
 
-template<>
-void EmitIR<IR::Opcode::A32ReadMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitReadMemory<16>(code, ctx, inst);
-}
+#define EMIT_MEMORY_OP_BITS(OPCODE, FUNC, BITS) \
+    template<> \
+    __attribute__((always_inline)) \
+    void EmitIR<IR::Opcode::OPCODE>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) { \
+        FUNC<BITS>(code, ctx, inst); \
+    }
 
-template<>
-void EmitIR<IR::Opcode::A32ReadMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitReadMemory<32>(code, ctx, inst);
-}
+// ReadMemory
+EMIT_MEMORY_OP_BITS(A32ReadMemory8, EmitReadMemory, 8)
+EMIT_MEMORY_OP_BITS(A32ReadMemory16, EmitReadMemory, 16)
+EMIT_MEMORY_OP_BITS(A32ReadMemory32, EmitReadMemory, 32)
+EMIT_MEMORY_OP_BITS(A32ReadMemory64, EmitReadMemory, 64)
 
-template<>
-void EmitIR<IR::Opcode::A32ReadMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitReadMemory<64>(code, ctx, inst);
-}
+// ExclusiveReadMemory
+EMIT_MEMORY_OP_BITS(A32ExclusiveReadMemory8, EmitExclusiveReadMemory, 8)
+EMIT_MEMORY_OP_BITS(A32ExclusiveReadMemory16, EmitExclusiveReadMemory, 16)
+EMIT_MEMORY_OP_BITS(A32ExclusiveReadMemory32, EmitExclusiveReadMemory, 32)
+EMIT_MEMORY_OP_BITS(A32ExclusiveReadMemory64, EmitExclusiveReadMemory, 64)
 
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveReadMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveReadMemory<8>(code, ctx, inst);
-}
+// WriteMemory
+EMIT_MEMORY_OP_BITS(A32WriteMemory8, EmitWriteMemory, 8)
+EMIT_MEMORY_OP_BITS(A32WriteMemory16, EmitWriteMemory, 16)
+EMIT_MEMORY_OP_BITS(A32WriteMemory32, EmitWriteMemory, 32)
+EMIT_MEMORY_OP_BITS(A32WriteMemory64, EmitWriteMemory, 64)
 
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveReadMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveReadMemory<16>(code, ctx, inst);
-}
+// ExclusiveWriteMemory
+EMIT_MEMORY_OP_BITS(A32ExclusiveWriteMemory8, EmitExclusiveWriteMemory, 8)
+EMIT_MEMORY_OP_BITS(A32ExclusiveWriteMemory16, EmitExclusiveWriteMemory, 16)
+EMIT_MEMORY_OP_BITS(A32ExclusiveWriteMemory32, EmitExclusiveWriteMemory, 32)
+EMIT_MEMORY_OP_BITS(A32ExclusiveWriteMemory64, EmitExclusiveWriteMemory, 64)
 
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveReadMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveReadMemory<32>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveReadMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveReadMemory<64>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32WriteMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitWriteMemory<8>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32WriteMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitWriteMemory<16>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32WriteMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitWriteMemory<32>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32WriteMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitWriteMemory<64>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveWriteMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveWriteMemory<8>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveWriteMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveWriteMemory<16>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveWriteMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveWriteMemory<32>(code, ctx, inst);
-}
-
-template<>
-void EmitIR<IR::Opcode::A32ExclusiveWriteMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    EmitExclusiveWriteMemory<64>(code, ctx, inst);
-}
+#undef EMIT_MEMORY_OP
+#undef EMIT_MEMORY_OP_BITS
 
 }  // namespace Dynarmic::Backend::Arm64

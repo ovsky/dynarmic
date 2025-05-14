@@ -5,6 +5,11 @@
 
 #include "dynarmic/backend/arm64/a32_address_space.h"
 
+#include <array>
+#include <utility>
+#include <type_traits>
+#include <boost/container/static_vector.hpp>
+
 #include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/devirtualize.h"
@@ -20,8 +25,19 @@
 
 namespace Dynarmic::Backend::Arm64 {
 
+// Helper to force inlining for small trampoline functions
+#if defined(__GNUC__) || defined(__clang__)
+#define DYN_FORCE_INLINE __attribute__((always_inline)) inline
+#elif defined(_MSC_VER)
+#define DYN_FORCE_INLINE __forceinline
+#else
+#define DYN_FORCE_INLINE inline
+#endif
+
+namespace {
+
 template<auto mfp, typename T>
-static void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
+DYN_FORCE_INLINE void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
     using namespace oaknut::util;
 
     const auto info = Devirtualize<mfp>(this_);
@@ -43,7 +59,7 @@ static void* EmitCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
 }
 
 template<auto mfp, typename T>
-static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
+DYN_FORCE_INLINE void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
     using namespace oaknut::util;
 
     const auto info = Devirtualize<mfp>(this_);
@@ -72,7 +88,7 @@ static void* EmitWrappedReadCallTrampoline(oaknut::CodeGenerator& code, T* this_
 }
 
 template<auto callback, typename T>
-static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const A32::UserConfig& conf) {
+DYN_FORCE_INLINE void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const A32::UserConfig& conf) {
     using namespace oaknut::util;
 
     oaknut::Label l_addr, l_this;
@@ -98,7 +114,7 @@ static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const 
 }
 
 template<auto mfp, typename T>
-static void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
+DYN_FORCE_INLINE void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this_) {
     using namespace oaknut::util;
 
     const auto info = Devirtualize<mfp>(this_);
@@ -127,7 +143,7 @@ static void* EmitWrappedWriteCallTrampoline(oaknut::CodeGenerator& code, T* this
 }
 
 template<auto callback, typename T>
-static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const A32::UserConfig& conf) {
+DYN_FORCE_INLINE void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const A32::UserConfig& conf) {
     using namespace oaknut::util;
 
     oaknut::Label l_addr, l_this;
@@ -155,6 +171,8 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
     return target;
 }
 
+} // anonymous namespace
+
 A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
         : AddressSpace(conf.code_cache_size)
         , conf(conf) {
@@ -162,7 +180,9 @@ A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
 }
 
 IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+    // Use static thread_local for temporary IR block to avoid heap allocations
+    thread_local IR::Block ir_block;
+    ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
 
     Optimization::PolyfillPass(ir_block, {});
     Optimization::NamingPass(ir_block);
@@ -190,35 +210,138 @@ void A32AddressSpace::EmitPrelude() {
 
     UnprotectCodeMemory();
 
-    prelude_info.read_memory_8 = EmitCallTrampoline<&A32::UserCallbacks::MemoryRead8>(code, conf.callbacks);
-    prelude_info.read_memory_16 = EmitCallTrampoline<&A32::UserCallbacks::MemoryRead16>(code, conf.callbacks);
-    prelude_info.read_memory_32 = EmitCallTrampoline<&A32::UserCallbacks::MemoryRead32>(code, conf.callbacks);
-    prelude_info.read_memory_64 = EmitCallTrampoline<&A32::UserCallbacks::MemoryRead64>(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_8 = EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead8>(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_16 = EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead16>(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_32 = EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead32>(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_64 = EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead64>(code, conf.callbacks);
-    prelude_info.exclusive_read_memory_8 = EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead8, u8>(code, conf);
-    prelude_info.exclusive_read_memory_16 = EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead16, u16>(code, conf);
-    prelude_info.exclusive_read_memory_32 = EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead32, u32>(code, conf);
-    prelude_info.exclusive_read_memory_64 = EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead64, u64>(code, conf);
-    prelude_info.write_memory_8 = EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite8>(code, conf.callbacks);
-    prelude_info.write_memory_16 = EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite16>(code, conf.callbacks);
-    prelude_info.write_memory_32 = EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite32>(code, conf.callbacks);
-    prelude_info.write_memory_64 = EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite64>(code, conf.callbacks);
-    prelude_info.wrapped_write_memory_8 = EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite8>(code, conf.callbacks);
-    prelude_info.wrapped_write_memory_16 = EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite16>(code, conf.callbacks);
-    prelude_info.wrapped_write_memory_32 = EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite32>(code, conf.callbacks);
-    prelude_info.wrapped_write_memory_64 = EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite64>(code, conf.callbacks);
-    prelude_info.exclusive_write_memory_8 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive8, u8>(code, conf);
-    prelude_info.exclusive_write_memory_16 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive16, u16>(code, conf);
-    prelude_info.exclusive_write_memory_32 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
-    prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
-    prelude_info.call_svc = EmitCallTrampoline<&A32::UserCallbacks::CallSVC>(code, conf.callbacks);
-    prelude_info.exception_raised = EmitCallTrampoline<&A32::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
-    prelude_info.isb_raised = EmitCallTrampoline<&A32::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
-    prelude_info.add_ticks = EmitCallTrampoline<&A32::UserCallbacks::AddTicks>(code, conf.callbacks);
-    prelude_info.get_ticks_remaining = EmitCallTrampoline<&A32::UserCallbacks::GetTicksRemaining>(code, conf.callbacks);
+    // Use a static array to batch trampoline emission for better cache locality
+    struct TrampolineEntry {
+        void** out_ptr;
+        void* (*emit_fn)(oaknut::CodeGenerator&, const A32::UserConfig&, void*);
+        const void* arg;
+    };
+
+    // Lambda wrappers for template emission
+    auto emit_read8 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryRead8>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_read16 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryRead16>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_read32 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryRead32>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_read64 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryRead64>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_read8 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead8>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_read16 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead16>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_read32 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead32>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_read64 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedReadCallTrampoline<&A32::UserCallbacks::MemoryRead64>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_exclusive_read8 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead8, u8>(code, conf);
+    };
+    auto emit_exclusive_read16 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead16, u16>(code, conf);
+    };
+    auto emit_exclusive_read32 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead32, u32>(code, conf);
+    };
+    auto emit_exclusive_read64 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveReadCallTrampoline<&A32::UserCallbacks::MemoryRead64, u64>(code, conf);
+    };
+    auto emit_write8 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite8>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_write16 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite16>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_write32 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite32>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_write64 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::MemoryWrite64>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_write8 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite8>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_write16 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite16>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_write32 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite32>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_wrapped_write64 = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitWrappedWriteCallTrampoline<&A32::UserCallbacks::MemoryWrite64>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_exclusive_write8 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive8, u8>(code, conf);
+    };
+    auto emit_exclusive_write16 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive16, u16>(code, conf);
+    };
+    auto emit_exclusive_write32 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
+    };
+    auto emit_exclusive_write64 = [](oaknut::CodeGenerator& code, const A32::UserConfig& conf, void*) {
+        return EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
+    };
+    auto emit_call_svc = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::CallSVC>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_exception_raised = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::ExceptionRaised>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_isb_raised = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_add_ticks = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::AddTicks>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+    auto emit_get_ticks_remaining = [](oaknut::CodeGenerator& code, const A32::UserConfig&, void* cb) {
+        return EmitCallTrampoline<&A32::UserCallbacks::GetTicksRemaining>(code, static_cast<A32::UserCallbacks*>(cb));
+    };
+
+    // Trampoline emission table
+    const TrampolineEntry trampolines[] = {
+        {reinterpret_cast<void**>(&prelude_info.read_memory_8), emit_read8, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.read_memory_16), emit_read16, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.read_memory_32), emit_read32, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.read_memory_64), emit_read64, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_read_memory_8), emit_wrapped_read8, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_read_memory_16), emit_wrapped_read16, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_read_memory_32), emit_wrapped_read32, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_read_memory_64), emit_wrapped_read64, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_read_memory_8), emit_exclusive_read8, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_read_memory_16), emit_exclusive_read16, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_read_memory_32), emit_exclusive_read32, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_read_memory_64), emit_exclusive_read64, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.write_memory_8), emit_write8, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.write_memory_16), emit_write16, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.write_memory_32), emit_write32, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.write_memory_64), emit_write64, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_write_memory_8), emit_wrapped_write8, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_write_memory_16), emit_wrapped_write16, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_write_memory_32), emit_wrapped_write32, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.wrapped_write_memory_64), emit_wrapped_write64, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_write_memory_8), emit_exclusive_write8, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_write_memory_16), emit_exclusive_write16, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_write_memory_32), emit_exclusive_write32, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.exclusive_write_memory_64), emit_exclusive_write64, nullptr},
+        {reinterpret_cast<void**>(&prelude_info.call_svc), emit_call_svc, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.exception_raised), emit_exception_raised, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.isb_raised), emit_isb_raised, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.add_ticks), emit_add_ticks, conf.callbacks},
+        {reinterpret_cast<void**>(&prelude_info.get_ticks_remaining), emit_get_ticks_remaining, conf.callbacks}
+    };
+
+    for (const auto& entry : trampolines) {
+        *entry.out_ptr = entry.emit_fn(code, conf, const_cast<void*>(entry.arg));
+    }
 
     oaknut::Label return_from_run_code, l_return_to_dispatcher;
 
@@ -420,5 +543,7 @@ void A32AddressSpace::RegisterNewBasicBlock(const IR::Block& block, const Emitte
     const auto range = boost::icl::discrete_interval<u32>::closed(descriptor.PC(), end_location.PC() - 1);
     block_ranges.AddRange(range, descriptor);
 }
+
+#undef DYN_FORCE_INLINE
 
 }  // namespace Dynarmic::Backend::Arm64
