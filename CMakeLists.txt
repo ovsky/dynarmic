@@ -12,6 +12,20 @@ if (MASTER_PROJECT)
     include(CTest)
 endif()
 
+# Enable Link-Time Optimization (LTO)
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result OUTPUT output)
+if(result)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+else()
+    message(WARNING "IPO/LTO not supported: ${output}")
+endif()
+
+# Enable compiler optimizations
+# `-O3` flag enables high-level optimizations, such as: 
+# inlining, loop unrolling, and vectorization, which can significantly improve performance.
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+
 # Dynarmic project options
 option(DYNARMIC_ENABLE_CPU_FEATURE_DETECTION "Turning this off causes dynarmic to assume the host CPU doesn't support anything later than SSE3" ON)
 option(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT "Enables support for systems that require W^X" OFF)
