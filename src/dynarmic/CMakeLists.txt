@@ -263,9 +263,15 @@ if ("A64" IN_LIST DYNARMIC_FRONTENDS)
 endif()
 
 if ("x86_64" IN_LIST ARCHITECTURE)
+    # xbyak is reached from installed headers (backend/x64/*.h), so it has to
+    # be part of the link interface. Zydis is not included by any installed
+    # header, so it stays private; a static build still pulls it in as a
+    # link-only dependency, which is why dynarmicConfig.cmake.in has to
+    # find it.
     target_link_libraries(dynarmic
-        PRIVATE
+        PUBLIC
             xbyak::xbyak
+        PRIVATE
             Zydis::Zydis
     )
 
@@ -339,7 +345,7 @@ if ("x86_64" IN_LIST ARCHITECTURE)
 endif()
 
 if ("arm64" IN_LIST ARCHITECTURE)
-    target_link_libraries(dynarmic PRIVATE merry::oaknut)
+    target_link_libraries(dynarmic PUBLIC merry::oaknut)
 
     target_architecture_specific_sources(dynarmic "arm64"
         backend/arm64/a32_jitstate.cpp
@@ -401,7 +407,7 @@ if ("arm64" IN_LIST ARCHITECTURE)
 endif()
 
 if ("riscv" IN_LIST ARCHITECTURE)
-    target_link_libraries(dynarmic PRIVATE biscuit::biscuit)
+    target_link_libraries(dynarmic PUBLIC biscuit::biscuit)
 
     target_sources(dynarmic PRIVATE
         backend/riscv64/abi.h
@@ -501,9 +507,23 @@ set_target_properties(dynarmic PROPERTIES
     VERSION ${dynarmic_VERSION}
     SOVERSION ${dynarmic_VERSION_MAJOR}.${dynarmic_VERSION_MINOR}
 )
+
+# The installed headers use nested namespace definitions, std::optional,
+# std::variant-adjacent library types and other C++20 facilities, so the
+# requirement has to be expressed as a usage requirement on the target. The
+# top-level CMAKE_CXX_STANDARD 20 setting only covers dynarmic's own
+# compilation units and is not exported; without this, a consumer of the
+# installed package inherits whatever the toolchain defaults to and fails to
+# compile the headers with errors that say nothing about C++ versions.
+target_compile_features(dynarmic PUBLIC cxx_std_20)
 target_compile_options(dynarmic PRIVATE ${DYNARMIC_CXX_FLAGS})
+# Every one of these is reached from installed headers (install(DIRECTORY
+# src/dynarmic TYPE INCLUDE ...)), so they have to be part of the link
+# interface: as PRIVATE dependencies their include directories do not reach
+# anything that includes a dynarmic header, which breaks both this project's own
+# tests and any consumer of the installed package.
 target_link_libraries(dynarmic
-    PRIVATE
+    PUBLIC
         Boost::boost
         fmt::fmt
         merry::mcl

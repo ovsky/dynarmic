@@ -26,6 +26,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Warn on CMake API deprecations
+#
+# Setting CMAKE_WARN_DEPRECATED here only has an effect while CMP0218 is unset
+# or OLD; under NEW, CMake ignores it and prints a policy warning on every
+# configure. This file declares cmake_minimum_required(VERSION 3.16), which
+# leaves every policy introduced after 3.16 unset, so the warning appears on
+# CMake 3.31 and newer. Selecting OLD keeps this setting meaningful and silences
+# the warning. A consumer adding mcl via add_subdirectory gets the same effect,
+# because the policy is resolved in this directory's scope. The guard keeps the
+# line harmless on CMake older than 3.31, which has no such policy.
+if (POLICY CMP0218)
+    cmake_policy(SET CMP0218 OLD)
+endif()
 set(CMAKE_WARN_DEPRECATED ON)
 
 # Disable in-source builds

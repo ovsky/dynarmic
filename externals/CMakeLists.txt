@@ -43,6 +43,13 @@ endif()
 
 if (NOT TARGET merry::mcl)
     set(MCL_INSTALL ON)
+    # mcl sets CMAKE_WARN_DEPRECATED after its project() call, which CMP0218
+    # declares has no effect. Choosing the OLD behaviour for this subtree keeps
+    # mcl's intent and stops CMake 3.31+ printing a policy warning on every
+    # configure. The guard keeps this working on CMake older than 3.31.
+    if (POLICY CMP0218)
+        cmake_policy(SET CMP0218 OLD)
+    endif()
     add_subdirectory(mcl)
 endif()
 
