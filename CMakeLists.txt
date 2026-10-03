@@ -51,6 +51,13 @@ if (NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set hard requirements for C++
+#
+# These only govern dynarmic's own sources. Consumers of the exported
+# dynarmic::dynarmic target are covered by the cxx_std_20 compile feature
+# requested in src/dynarmic/CMakeLists.txt, which does travel with the target;
+# directory-scoped CMAKE_CXX_STANDARD does not, and a consumer would otherwise
+# silently be compiled at the toolchain's default standard and fail on the
+# installed headers.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -172,6 +179,15 @@ else()
     set(_dynarmic_prefer_bundled_boost ${DYNARMIC_USE_BUNDLED_BOOST})
 endif()
 
+# CMake 3.30 deprecated the FindBoost module and CMake 4 removed it (CMP0167).
+# Opting into the policy keeps the module-mode lookup working while CMake is
+# still willing to run it, and stops the deprecation warning from being printed
+# on every configure. The guard keeps this file usable on CMake older than
+# 3.30, which has no such policy.
+if (POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif()
+
 if (NOT _dynarmic_prefer_bundled_boost)
     find_package(Boost 1.57 REQUIRED)
 else()
@@ -246,6 +262,22 @@ endif()
 #
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+
+# Whether a consumer of the installed package has to resolve dynarmic's own
+# dependencies before dynarmicTargets.cmake is usable.  Only a static build
+# needs that: for a shared build the dependencies were linked into the shared
+# object, and consumers only ever need dynarmic's headers.
+#
+# This has to be spelled out as its own boolean.  Substituting BUILD_SHARED_LIBS
+# into dynarmicConfig.cmake.in directly would expand an unset variable to
+# nothing, leaving `if (NOT )`, which CMake reads as false, so the whole
+# dependency block would be silently skipped and every imported target the
+# exported target references would be left undefined.
+if (BUILD_SHARED_LIBS)
+    set(DYNARMIC_CONSUMER_NEEDS_DEPENDENCIES OFF)
+else()
+    set(DYNARMIC_CONSUMER_NEEDS_DEPENDENCIES ON)
+endif()
 
 install(TARGETS dynarmic EXPORT dynarmicTargets)
 install(EXPORT dynarmicTargets

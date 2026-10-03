@@ -4,8 +4,43 @@ include(CMakeFindDependencyMacro)
 
 set(ARCHITECTURE "@ARCHITECTURE@")
 
-if (NOT @BUILD_SHARED_LIBS@)
-    find_dependency(Boost 1.57)
+# Locate Boost for the consumer. This has to try config mode first: CMake 3.30
+# deprecated the FindBoost module and CMake 4 removed it (CMP0167), so a
+# module-mode find_package(Boost) is deprecated on 3.30+ and does nothing at all
+# on CMake 4. Config mode works on every CMake version and finds any Boost that
+# ships its own config package.
+#
+# Module mode is kept as a fallback for Boost installations old enough not to
+# ship a config package. Selecting CMP0167 OLD first keeps that fallback working
+# on the CMake versions where FindBoost still exists; on CMake 4 the fallback
+# simply fails, which is the documented behaviour of that version.
+if (NOT DEFINED BOOST_INCLUDEDIR AND NOT DEFINED Boost_DIR)
+    find_package(Boost 1.57 QUIET CONFIG)
+    if (NOT Boost_FOUND)
+        if (POLICY CMP0167)
+            cmake_policy(SET CMP0167 OLD)
+        endif()
+        find_package(Boost 1.57 QUIET)
+    endif()
+    if (NOT Boost_FOUND)
+        set(dynarmic_FOUND FALSE)
+        set(dynarmic_NOT_FOUND_MESSAGE
+            "dynarmic requires Boost headers (>= 1.57), because its installed \
+headers include <boost/variant.hpp> and <boost/icl/...>. Install Boost and \
+re-run CMake, or point CMake at an existing installation with \
+-DBOOST_INCLUDEDIR=<path> or -DBoost_DIR=<path>.")
+        return()
+    endif()
+endif()
+
+# A static dynarmic needs its dependencies resolved here, not just when dynarmic
+# itself was built: the installed headers include Boost, fmt, mcl and
+# tsl-robin-map directly, so a consumer that includes any dynarmic header has to
+# be able to find them.
+if (@DYNARMIC_CONSUMER_NEEDS_DEPENDENCIES@)
+    # Boost was already resolved above, so it must not be searched for again
+    # here: a repeat module-mode lookup would re-emit the CMP0167 deprecation
+    # warning. The targets it defines are already in scope.
     find_dependency(fmt 9)
     find_dependency(mcl 0.1.12 EXACT)
     find_dependency(tsl-robin-map)
