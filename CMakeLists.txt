@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.12)
-project(dynarmic LANGUAGES C CXX ASM VERSION 6.7.0)
+cmake_minimum_required(VERSION 3.16)
+project(dynarmic LANGUAGES C CXX VERSION 6.7.0)
 
 # Determine if we're built as a subproject (using add_subdirectory)
 # or if this is the master project.
@@ -36,7 +36,10 @@ option(DYNARMIC_TESTS_USE_UNICORN "Enable fuzzing tests against unicorn" OFF)
 option(DYNARMIC_USE_LLVM "Support disassembly of jitted x86_64 code using LLVM" OFF)
 option(DYNARMIC_USE_PRECOMPILED_HEADERS "Use precompiled headers" ON)
 option(DYNARMIC_USE_BUNDLED_EXTERNALS "Use all bundled externals (useful when e.g. cross-compiling)" OFF)
+option(DYNARMIC_USE_BUNDLED_BOOST "Prefer a Boost headers checkout over a found Boost package" ON)
 option(DYNARMIC_WARNINGS_AS_ERRORS "Warnings as errors" ${MASTER_PROJECT})
+set(DYNARMIC_BUNDLED_BOOST_DIR "${PROJECT_SOURCE_DIR}/externals/ext-boost"
+    CACHE PATH "Boost headers checkout used when DYNARMIC_USE_BUNDLED_BOOST is ON and no Boost package is found")
 if (NOT DEFINED DYNARMIC_FRONTENDS)
     set(DYNARMIC_FRONTENDS "A32;A64" CACHE STRING "Selects which frontends to enable")
 endif()
@@ -141,6 +144,15 @@ if (NOT DEFINED ARCHITECTURE)
 endif()
 message(STATUS "Target architecture: ${ARCHITECTURE}")
 
+# The only assembly source in the tree (tests/rsqrt_test_fn.s) is used to verify
+# the x86-64 rsqrt fast path against hand-written SSE code, and is excluded on
+# MSVC.  Enabling the ASM language unconditionally costs configure time and
+# triggers CMP0194 (cl.exe is not an assembler), so only ask for it when
+# something will actually be assembled.
+if (DYNARMIC_TESTS AND "x86_64" IN_LIST ARCHITECTURE AND NOT MSVC AND NOT DYNARMIC_MULTIARCH_BUILD)
+    enable_language(ASM)
+endif()
+
 # Forced use of individual bundled libraries for non-REQUIRED library is possible with e.g. cmake -DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON ...
 
 if (DYNARMIC_USE_BUNDLED_EXTERNALS)
@@ -154,7 +166,43 @@ if (DYNARMIC_USE_BUNDLED_EXTERNALS)
     set(CMAKE_DISABLE_FIND_PACKAGE_Zydis ON)
 endif()
 
-find_package(Boost 1.57 REQUIRED)
+if (DYNARMIC_USE_BUNDLED_EXTERNALS)
+    set(_dynarmic_prefer_bundled_boost ON)
+else()
+    set(_dynarmic_prefer_bundled_boost ${DYNARMIC_USE_BUNDLED_BOOST})
+endif()
+
+if (NOT _dynarmic_prefer_bundled_boost)
+    find_package(Boost 1.57 REQUIRED)
+else()
+    find_package(Boost 1.57 QUIET)
+endif()
+
+if (Boost_FOUND)
+    message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
+elseif (_dynarmic_prefer_bundled_boost AND EXISTS "${DYNARMIC_BUNDLED_BOOST_DIR}/boost/variant.hpp")
+    # CMake 4 removed the FindBoost module (CMP0167), so rely on the vendored
+    # headers instead.  Defining the conventional imported target ourselves
+    # keeps every `Boost::boost` reference -- including the one exported to
+    # installed consumers via dynarmicConfig.cmake -- working unchanged.
+    add_library(Boost::boost INTERFACE IMPORTED GLOBAL)
+    set_target_properties(Boost::boost PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${DYNARMIC_BUNDLED_BOOST_DIR}"
+    )
+    message(STATUS "Using bundled Boost headers: ${DYNARMIC_BUNDLED_BOOST_DIR}")
+else()
+    message(FATAL_ERROR
+        "Boost headers were not found. Dynarmic uses Boost header-only "
+        "(boost::variant, boost::icl).\n"
+        "Either install Boost >= 1.57 development headers, or check out a copy "
+        "of them into '${DYNARMIC_BUNDLED_BOOST_DIR}':\n"
+        "  git clone --depth 1 https://github.com/yuzu-mirror/ext-boost \"${DYNARMIC_BUNDLED_BOOST_DIR}\"\n"
+        "Or pass -DDYNARMIC_BUNDLED_BOOST_DIR=<path> to point at an existing checkout."
+    )
+endif()
+
+unset(_dynarmic_prefer_bundled_boost)
+
 find_package(fmt 9 CONFIG)
 find_package(mcl 0.1.12 EXACT CONFIG)
 find_package(tsl-robin-map CONFIG)

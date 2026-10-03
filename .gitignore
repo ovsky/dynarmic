@@ -10,3 +10,4 @@ src/dynarmic/backend/x64/mig/
 # System files
 .DS_Store
 .vscode
+externals/ext-boost/
