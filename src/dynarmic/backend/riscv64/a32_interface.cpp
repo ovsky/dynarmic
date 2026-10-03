@@ -14,6 +14,7 @@
 #include "dynarmic/backend/riscv64/a32_address_space.h"
 #include "dynarmic/backend/riscv64/a32_core.h"
 #include "dynarmic/backend/riscv64/a32_jitstate.h"
+#include "dynarmic/backend/cache_invalidation_range.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/interface/A32/a32.h"
 
@@ -63,8 +64,13 @@ struct Jit::Impl final {
     }
 
     void InvalidateCacheRange(u32 start_address, size_t length) {
+        const auto range = Backend::MakeInvalidationRange<u32>(start_address, length);
+        if (!range) {
+            return;
+        }
+
         std::unique_lock lock{invalidation_mutex};
-        invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        invalid_cache_ranges.add(*range);
         HaltExecution(HaltReason::CacheInvalidation);
     }
 

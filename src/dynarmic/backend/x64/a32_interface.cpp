@@ -14,6 +14,7 @@
 #include <mcl/scope_exit.hpp>
 #include <mcl/stdint.hpp>
 
+#include "dynarmic/backend/cache_invalidation_range.h"
 #include "dynarmic/backend/x64/a32_emit_x64.h"
 #include "dynarmic/backend/x64/a32_jitstate.h"
 #include "dynarmic/backend/x64/block_of_code.h"
@@ -119,8 +120,13 @@ struct Jit::Impl {
     }
 
     void InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
+        const auto range = Backend::MakeInvalidationRange<u32>(start_address, length);
+        if (!range) {
+            return;
+        }
+
         std::unique_lock lock{invalidation_mutex};
-        invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
+        invalid_cache_ranges.add(*range);
         HaltExecution(HaltReason::CacheInvalidation);
     }
 

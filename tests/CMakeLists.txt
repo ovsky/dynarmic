@@ -6,6 +6,7 @@ add_executable(dynarmic_tests
     fp/mantissa_util_tests.cpp
     fp/unpacked_tests.cpp
     rand_int.h
+    test_cache_invalidation.cpp
 )
 
 if ("A32" IN_LIST DYNARMIC_FRONTENDS)

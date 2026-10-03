@@ -43,8 +43,11 @@ public:
 
     /**
      * Invalidate the code cache at a range of addresses.
+     * A range that reaches or passes the end of the guest address space is
+     * clamped to the end of that space.
      * @param start_address The starting address of the range to invalidate.
-     * @param length The length (in bytes) of the range to invalidate.
+     * @param length The length (in bytes) of the range to invalidate. If this
+     * is zero the call is a no-op and execution is not halted.
      */
     void InvalidateCacheRange(std::uint64_t start_address, std::size_t length);
 

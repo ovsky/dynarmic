@@ -17,6 +17,7 @@
 #include "dynarmic/backend/arm64/a64_address_space.h"
 #include "dynarmic/backend/arm64/a64_core.h"
 #include "dynarmic/backend/arm64/a64_jitstate.h"
+#include "dynarmic/backend/cache_invalidation_range.h"
 #include "dynarmic/common/atomic.h"
 #include "dynarmic/interface/A64/a64.h"
 #include "dynarmic/interface/A64/config.h"
@@ -72,9 +73,13 @@ public:
     }
 
     void InvalidateCacheRange(std::uint64_t start_address, std::size_t length) {
-        if (length == 0) return;
+        const auto range = Backend::MakeInvalidationRange<u64>(start_address, length);
+        if (!range) {
+            return;
+        }
+
         std::unique_lock lock{invalidation_mutex};
-        invalid_cache_ranges.add(boost::icl::discrete_interval<u64>::closed(start_address, start_address + length - 1));
+        invalid_cache_ranges.add(*range);
         HaltExecution(HaltReason::CacheInvalidation);
     }
 

@@ -12,6 +12,7 @@
 #include <mcl/bit_cast.hpp>
 #include <mcl/scope_exit.hpp>
 
+#include "dynarmic/backend/cache_invalidation_range.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
 #include "dynarmic/backend/x64/a64_jitstate.h"
 #include "dynarmic/backend/x64/block_of_code.h"
@@ -119,10 +120,13 @@ public:
     }
 
     void InvalidateCacheRange(u64 start_address, size_t length) {
+        const auto range = Backend::MakeInvalidationRange<u64>(start_address, length);
+        if (!range) {
+            return;
+        }
+
         std::unique_lock lock{invalidation_mutex};
-        const auto end_address = static_cast<u64>(start_address + length - 1);
-        const auto range = boost::icl::discrete_interval<u64>::closed(start_address, end_address);
-        invalid_cache_ranges.add(range);
+        invalid_cache_ranges.add(*range);
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
